@@ -30,6 +30,8 @@ https://imbalanced-learn.org/stable/common_pitfalls.html
 import argparse
 import random
 from pathlib import Path
+import imblearn
+import sklearn
 
 import numpy as np
 import pandas as pd
@@ -433,11 +435,6 @@ def main():
     if (not np.isfinite(args.beta) or args.beta <= 0 or not 0 <= args.min_specificity <= 1
             or any(not np.isfinite(w) or w < 1 for w in args.positive_weights)):
         parser.error("beta > 0, min-specificity в [0,1], positive-weights >= 1; значения конечные")
-    try:
-        import imblearn
-        import sklearn
-    except ImportError:
-        parser.error("Установите зависимости: python -m pip install imbalanced-learn scikit-learn")
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)

@@ -24,7 +24,7 @@ from pathlib import Path
 if __package__:
     from .train import analyze, resolve_image, DEFAULT_MODEL
 else:
-    from train import analyze, resolve_image, DEFAULT_MODEL
+    from quality_of_densitometry.models.position_model.train import analyze, resolve_image, DEFAULT_MODEL
 
 def predict(source, side="auto", model_path=DEFAULT_MODEL, device="cpu"):
     """Тот же конвейер first_model -> CV, что при оценке датасета в train.py."""

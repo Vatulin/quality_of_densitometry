@@ -19,7 +19,7 @@ import torch
 try:
     from .train import HERE, PREPROCESS, FeaturePredictor, build_model, image_tensor, read_image
 except ImportError:
-    from train import HERE, PREPROCESS, FeaturePredictor, build_model, image_tensor, read_image
+    from quality_of_densitometry.models.spine_model.train import HERE, PREPROCESS, FeaturePredictor, build_model, image_tensor, read_image
 
 
 class SpinePipeline:

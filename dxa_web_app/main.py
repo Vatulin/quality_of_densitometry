@@ -357,22 +357,34 @@ class HipQualityModel:
         print(f"✅ [hip_quality] загружено: {self.weights_path} "
               f"(thresholds={self.thresholds}, img_size={self.img_size})")
 
-    def predict(self, dcm_path: str) -> Dict:
+    def predict(self, dcm_path: str, side: str | None = None) -> Dict:
+        """
+        side: "right" / "left" / None.
+        В тренировке side_id = (side == "right").astype(int) → right=0, left=1.
+        Если сторона неизвестна — считаем обе и берём максимум (страховка).
+        """
         try:
             arr = load_dicom_minmax(dcm_path)
             img = to_square_gray(arr, self.img_size)
             x = torch.from_numpy(np.array(img, copy=True)).float()[None, None] / 255.0
             x = ((x - 0.5) / 0.25).to(self.device)
 
+            if side == "right":
+                side_ids = [0]
+            elif side == "left":
+                side_ids = [1]
+            else:
+                side_ids = [0, 1]
+
             probs_per_side = []
             with torch.no_grad():
-                for side_val in (0, 1):
-                    side_t = torch.tensor([side_val], dtype=torch.long, device=self.device)
+                for sv in side_ids:
+                    side_t = torch.tensor([sv], dtype=torch.long, device=self.device)
                     logits = self.model(x, side_t)
                     probs_per_side.append(torch.sigmoid(logits).cpu().numpy()[0])
 
-            # берём максимум по сторонам — клинически безопаснее (не пропустим дефект)
-            probs = np.max(np.stack(probs_per_side, axis=0), axis=0)
+            probs = (np.max(np.stack(probs_per_side, axis=0), axis=0)
+                    if len(probs_per_side) > 1 else probs_per_side[0])
 
             violations, confidences = [], []
             for j, name in enumerate(self.LABEL_COLS):
@@ -559,54 +571,66 @@ class MultiModelAnalyzer:
         results = {
             "filename": Path(dcm_path).name,
             "anatomical_region": None,
+            "hip_side": None,
             "quality_class": 0,
             "quality_prob": 0.0,
+            "violation_prob": 0.0,     # ← сырая вероятность нарушения (для отладки/UI)
             "violation_type": [],
             "model_predictions": {},
         }
 
-        # 1) Определение части тела
+        # 1) Часть тела и сторона
+        hip_side = None
         if "body_part" in self.models:
             pred = self.models["body_part"].predict(dcm_path)
             results["model_predictions"]["body_part"] = pred
             if pred["status"] == "success":
-                if pred.get("class_name") == "spine":
+                name = pred.get("class_name")
+                if name == "spine":
                     results["anatomical_region"] = "Поясничный отдел позвоночника"
-                else:
+                elif name == "hip_right":
                     results["anatomical_region"] = "Проксимальный отдел бедра"
+                    hip_side = "right"
+                elif name == "hip_left":
+                    results["anatomical_region"] = "Проксимальный отдел бедра"
+                    hip_side = "left"
+        results["hip_side"] = hip_side
 
         region = results["anatomical_region"]
         violations: List[str] = []
-        max_confidence = 0.0
+        violation_probs: List[float] = []   # ← все сырые вероятности нарушений
 
         # 2) Позвоночник
         if region == "Поясничный отдел позвоночника" and "spine" in self.models:
             pred = self.models["spine"].predict(dcm_path)
             results["model_predictions"]["spine"] = pred
-            if pred["status"] == "success" and pred["class_id"] == 1:
-                violations.append("Не выравнена ось позвоночника")
-                max_confidence = max(max_confidence, pred["confidence"])
+            if pred["status"] == "success":
+                violation_probs.append(float(pred.get("probability", 0.0)))
+                if pred["class_id"] == 1:
+                    violations.append("Не выравнена ось позвоночника")
 
-        # 3) Проксимальный отдел бедра — hip_quality
+        # 3) Бедро
         if region == "Проксимальный отдел бедра" and "hip_quality" in self.models:
-            pred = self.models["hip_quality"].predict(dcm_path)
+            pred = self.models["hip_quality"].predict(dcm_path, side=hip_side)
             results["model_predictions"]["hip_quality"] = pred
-            if pred["status"] == "success" and pred["class_id"] == 1:
-                for v in pred.get("violations", []):
-                    if v not in violations:
-                        violations.append(v)
-                max_confidence = max(max_confidence, pred["confidence"])
+            if pred["status"] == "success":
+                for p in pred.get("probabilities", []):
+                    violation_probs.append(float(p))
+                if pred["class_id"] == 1:
+                    for v in pred.get("violations", []):
+                        if v not in violations:
+                            violations.append(v)
 
         # 4) Артефакты — всегда
         if "artifact" in self.models:
             pred = self.models["artifact"].predict(dcm_path)
             results["model_predictions"]["artifact"] = pred
-            if pred["status"] == "success" and pred["class_id"] > 0:
-                if "Некорректная укладка" not in violations:
+            if pred["status"] == "success":
+                violation_probs.append(float(pred.get("probability", 0.0)))
+                if pred["class_id"] > 0 and "Некорректная укладка" not in violations:
                     violations.append("Некорректная укладка")
-                max_confidence = max(max_confidence, pred["confidence"])
 
-        # 5) Position (только для бедра)
+        # 5) Position (CV) — только бедро; вероятности не даёт, только флаг
         if "position" in self.models and region == "Проксимальный отдел бедра":
             pred = self.models["position"].predict(dcm_path, body_part="hip")
             results["model_predictions"]["position"] = pred
@@ -614,11 +638,19 @@ class MultiModelAnalyzer:
                 for v in pred.get("violations", []):
                     if v not in violations:
                         violations.append(v)
-                max_confidence = max(max_confidence, pred["confidence"])
+
+        max_violation_prob = max(violation_probs) if violation_probs else 0.0
 
         results["violation_type"] = violations
-        results["quality_prob"] = float(max_confidence)
-        results["quality_class"] = 1 if violations else 0
+        results["violation_prob"] = float(max_violation_prob)
+
+        if violations:
+            results["quality_class"] = 1
+            results["quality_prob"] = float(max_violation_prob)
+        else:
+            results["quality_class"] = 0
+            results["quality_prob"] = float(1.0 - max_violation_prob)  # ← уверенность «всё ОК»
+
         return results
 
 
@@ -712,14 +744,18 @@ async def download_result(task_id: str):
     task = tasks.get(task_id)
     if not task or task["status"] != "COMPLETED":
         return {"error": "Результат еще не готов"}
+
+    side_ru = {"right": "Правый", "left": "Левый"}
     rows = []
     for result in task["results"]:
         rows.append({
             "filename": result["filename"],
             "path": result.get("path", ""),
             "anatomical_region": result["anatomical_region"] or "",
+            "hip_side": side_ru.get(result.get("hip_side"), ""),
             "quality_class": result["quality_class"],
-            "quality_prob": result["quality_prob"],
+            "quality_prob": round(result["quality_prob"], 4),
+            "violation_prob": round(result.get("violation_prob", 0.0), 4),
             "violation_type": ";".join(result["violation_type"]) if result["violation_type"] else "",
         })
     df = pd.DataFrame(rows)

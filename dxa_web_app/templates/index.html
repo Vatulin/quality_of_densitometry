@@ -57,6 +57,7 @@
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Файл</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Путь</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Область</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Сторона</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Качество</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Вероятность</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Нарушения</th>
@@ -88,12 +89,12 @@
         </div>
     </div>
 
-    <script>
+        <script>
         const dropZone = document.getElementById('drop-zone');
         const fileInput = document.getElementById('file-input');
         const pathModal = document.getElementById('path-modal');
         const modalPathText = document.getElementById('modal-path-text');
-        
+
         let currentTaskId = null;
         let pollInterval = null;
 
@@ -110,7 +111,7 @@
             if (e.target.files.length) handleFile(e.target.files[0]);
         });
 
-        // Закрытие модального окна пути
+        // Модальное окно пути
         document.getElementById('close-path-modal').addEventListener('click', () => {
             pathModal.classList.remove('active');
         });
@@ -135,7 +136,7 @@
             try {
                 const response = await fetch('/api/analyze', { method: 'POST', body: formData });
                 const data = await response.json();
-                
+
                 if (data.error) {
                     alert(data.error);
                     return;
@@ -150,7 +151,7 @@
 
         function startPolling() {
             if (pollInterval) clearInterval(pollInterval);
-            
+
             pollInterval = setInterval(async () => {
                 try {
                     const response = await fetch(`/api/status/${currentTaskId}`);
@@ -186,19 +187,35 @@
 
             results.forEach(row => {
                 const tr = document.createElement('tr');
-                const qualityClass = row.quality_class === 1 ? 
-                    '<span class="px-2 py-1 text-xs rounded-full bg-red-100 text-red-800">Нарушение</span>' : 
-                    '<span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">OK</span>';
-                
-                const violations = row.violation_type && row.violation_type.length > 0 ? 
-                    row.violation_type : '-';
-                
+
+                // === Всего два варианта: OK или Нарушение ===
+                const qualityClass = row.quality_class === 1
+                    ? '<span class="px-2 py-1 text-xs rounded-full bg-red-100 text-red-800">Нарушение</span>'
+                    : '<span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">OK</span>';
+
+                // Сторона
+                let sideCell = '<span class="text-gray-400">—</span>';
+                if (row.hip_side === 'right') {
+                    sideCell = '<span class="px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-800">Правый</span>';
+                } else if (row.hip_side === 'left') {
+                    sideCell = '<span class="px-2 py-1 text-xs rounded-full bg-purple-100 text-purple-800">Левый</span>';
+                }
+
+                const violations = (row.violation_type && row.violation_type.length > 0)
+                    ? row.violation_type
+                    : '-';
+
+                const probText = (row.quality_prob !== undefined && row.quality_prob !== null)
+                    ? (row.quality_prob * 100).toFixed(1) + '%'
+                    : '-';
+
                 tr.innerHTML = `
                     <td class="px-6 py-4 font-medium">${row.filename}</td>
                     <td class="px-6 py-4 text-sm text-gray-600 font-mono max-w-xs truncate path-cell" onclick="showPathModal('${(row.path || '').replace(/'/g, "\\'")}')">${row.path || '-'}</td>
                     <td class="px-6 py-4">${row.anatomical_region || '-'}</td>
+                    <td class="px-6 py-4">${sideCell}</td>
                     <td class="px-6 py-4">${qualityClass}</td>
-                    <td class="px-6 py-4">${row.quality_prob !== undefined ? (row.quality_prob * 100).toFixed(1) + '%' : '-'}</td>
+                    <td class="px-6 py-4">${probText}</td>
                     <td class="px-6 py-4 text-sm text-gray-600">${violations}</td>
                 `;
                 tbody.appendChild(tr);

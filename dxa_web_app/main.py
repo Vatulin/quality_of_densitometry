@@ -1,14 +1,15 @@
 import uuid
 import zipfile
-from pathlib import Path
-from typing import Dict, List
-
 import cv2
 import numpy as np
 import pandas as pd
 import pydicom
 import torch
 import torch.nn as nn
+
+
+from pathlib import Path
+from typing import Dict, List
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
@@ -17,7 +18,7 @@ from scipy.ndimage import gaussian_filter, median_filter
 from scipy.special import expit
 from torchvision import models
 
-# --- НАСТРОЙКИ ---
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PIXEL_SPACING_X = 0.6   # мм (из ТЗ)
 PIXEL_SPACING_Y = 1.05  # мм (из ТЗ)
@@ -26,7 +27,7 @@ PIXEL_SPACING_Y = 1.05  # мм (из ТЗ)
 # ====================== ОБЩИЕ УТИЛИТЫ ======================
 
 def load_dicom_minmax(dcm_path) -> np.ndarray:
-    """min-max нормализация — как во всех тренировочных скриптах."""
+    """min-max нормализация"""
     ds = pydicom.dcmread(str(dcm_path))
     arr = ds.pixel_array.astype(np.float32)
     arr -= arr.min()
@@ -45,9 +46,7 @@ def to_square_gray(arr: np.ndarray, size: int) -> Image.Image:
     return canvas.resize((size, size), Image.Resampling.BILINEAR)
 
 
-# ====================== BODY PART MODEL ======================
-# Архитектура из import numpy as np.txt: ResNet18, 2 класса (spine / hip),
-# 1-канальный вход, IMG_SIZE=224.
+# BODY PART MODEL
 
 class BodyPartModel:
     CLASS_NAMES = ["spine", "hip_right", "hip_left"]
@@ -121,61 +120,149 @@ class BodyPartModel:
             return {"status": "error", "error": str(e)}
 
 
-# ====================== SPINE MODEL ======================
-# Из "Обучение на малом наборе…": ансамбль оценщиков
-# (BalancedRandomForest или LogisticRegression) на геометрических признаках
-# + (опционально) замороженные CNN-признаки ResNet18 / XRV-DenseNet121.
+#  SPINE MODEL
 
 class SpineModel:
     IMG_SIZE = 224
     FEATURE_VERSION = "spatial_resnet18_ridge_v2"
 
-    def __init__(self, weights_path: str):
+    def __init__(self, weights_path: str, debug: bool = False):
         self.device = DEVICE
         self.weights_path = Path(weights_path)
+        self.debug = debug
 
-        ckpt = torch.load(self.weights_path, map_location=self.device, weights_only=False)
+        if not self.weights_path.is_file():
+            raise FileNotFoundError(f"[spine] веса не найдены: {self.weights_path}")
+
+        ckpt = torch.load(
+            self.weights_path, map_location=self.device, weights_only=False
+        )
+
+        # --- feature_version: жёсткая проверка, не warning ---
         self.feature_version = ckpt.get("feature_version")
-        if self.feature_version and self.feature_version != self.FEATURE_VERSION:
-            print(f"⚠️ [spine] feature_version={self.feature_version} ≠ {self.FEATURE_VERSION}")
+        if self.feature_version != self.FEATURE_VERSION:
+            raise ValueError(
+                f"[spine] feature_version несовместим: "
+                f"в чекпоинте {self.feature_version!r}, "
+                f"ожидалось {self.FEATURE_VERSION!r}"
+            )
+
         self.states = ckpt.get("estimators", [])
+        if not self.states:
+            raise ValueError(
+                "[spine] в чекпоинте пустой список estimators — "
+                "модель не сможет ничего предсказать"
+            )
+
         self.threshold = float(ckpt.get("threshold", 0.5))
+        if not np.isfinite(self.threshold):
+            raise ValueError(f"[spine] некорректный threshold: {self.threshold!r}")
+
         self.uses_cnn = bool(ckpt.get("uses_cnn", False))
         self.encoder_kind = ckpt.get("encoder_kind", "resnet18")
 
         self.encoder = None
         if self.uses_cnn:
-            self.encoder = self._build_encoder(self.encoder_kind)
             enc_state = ckpt.get("encoder_state_dict", {})
-            if enc_state:
-                self.encoder.load_state_dict(enc_state)
+            if not enc_state:
+                raise ValueError(
+                    "[spine] uses_cnn=True, но encoder_state_dict пуст: "
+                    "веса энкодера не сохранены, предсказания будут шумом"
+                )
+            self.encoder = self._build_encoder(self.encoder_kind)
+            missing, unexpected = self.encoder.load_state_dict(
+                enc_state, strict=False
+            )
+            if self.debug and (missing or unexpected):
+                print(f"[spine] encoder load: missing={missing}, "
+                      f"unexpected={unexpected}")
             self.encoder.to(self.device).eval()
 
-        print(f"✅ [spine] загружено: {self.weights_path} "
-              f"(CNN={self.uses_cnn}, encoder={self.encoder_kind}, threshold={self.threshold:.4f})")
+        print(
+            f"✅ [spine] загружено: {self.weights_path} "
+            f"(CNN={self.uses_cnn}, encoder={self.encoder_kind}, "
+            f"threshold={self.threshold:.4f}, folds={len(self.states)})"
+        )
 
     @staticmethod
     def _build_encoder(kind: str) -> nn.Module:
         if kind == "resnet18":
             model = models.resnet18(weights=None)
-            encoder = nn.Sequential(*list(model.children())[:-2], nn.AdaptiveAvgPool2d((2, 2)))
+            encoder = nn.Sequential(
+                *list(model.children())[:-2], nn.AdaptiveAvgPool2d((2, 2))
+            )
         elif kind == "xrv-densenet121":
             model = models.densenet121(weights=None)
-            model.features.conv0 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            encoder = nn.Sequential(model.features, nn.ReLU(), nn.AdaptiveAvgPool2d((2, 2)))
+            model.features.conv0 = nn.Conv2d(
+                1, 64, kernel_size=7, stride=2, padding=3, bias=False
+            )
+            encoder = nn.Sequential(
+                model.features, nn.ReLU(), nn.AdaptiveAvgPool2d((2, 2))
+            )
         else:
             raise ValueError(f"Неизвестный экстрактор: {kind}")
         encoder.encoder_kind = kind
         encoder.requires_grad_(False)
         return encoder.eval()
 
-    def _geometry_features(self, img: Image.Image) -> np.ndarray:
+    @staticmethod
+    def _as_gray_unit(img) -> np.ndarray:
+        if isinstance(img, Image.Image):
+            if img.mode != "L":
+                img = img.convert("L")
+            arr = np.asarray(img, dtype=np.float64)
+            if arr.ndim != 2:
+                raise ValueError(f"[spine] PIL дал shape={arr.shape}")
+            return arr / 255.0
+
+        if not isinstance(img, np.ndarray):
+            raise TypeError(
+                f"[spine] ожидался PIL.Image или np.ndarray, "
+                f"получено {type(img).__name__}"
+            )
+
+        arr = img
+        if arr.ndim == 3:
+            if arr.shape[2] == 3:
+                # Rec.601 luma — тот же переход, что делает PIL.convert("L")
+                arr = (
+                    0.299 * arr[..., 0]
+                    + 0.587 * arr[..., 1]
+                    + 0.114 * arr[..., 2]
+                )
+            elif arr.shape[2] == 1:
+                arr = arr[..., 0]
+            else:
+                raise ValueError(f"[spine] неподдерживаемый shape={arr.shape}")
+        if arr.ndim != 2:
+            raise ValueError(f"[spine] ожидался 2D, shape={arr.shape}")
+        if arr.size == 0:
+            raise ValueError("[spine] пустое изображение")
+
+        arr = arr.astype(np.float64, copy=False)
+        mn, mx = float(arr.min()), float(arr.max())
+        if not np.isfinite(mn) or not np.isfinite(mx):
+            raise ValueError("[spine] изображение содержит NaN/Inf")
+
+        if mx <= 1.0 + 1e-6:
+            return arr  # уже в [0,1]
+        if mx <= 255.0 + 1e-6:
+            return arr / 255.0  # 8-битный диапазон
+        # 12/16-битный — min-max, как в train.read_image
+        rng = mx - mn
+        if rng <= 0:
+            raise ValueError("[spine] постоянная яркость изображения")
+        return (arr - mn) / rng
+
+    def _geometry_features(self, img) -> np.ndarray:
         """Точная копия функции из train.py (spine_model)."""
-        arr = np.asarray(img, dtype=np.float64) / 255.0
+        arr = self._as_gray_unit(img)
         features = []
         h, w = arr.shape
         for top, bottom in ((0.12, 0.72), (0.22, 0.82)):
-            y0, y1, x0, x1 = int(top * h), int(bottom * h), int(0.2 * w), int(0.8 * w)
+            y0, y1, x0, x1 = (
+                int(top * h), int(bottom * h), int(0.2 * w), int(0.8 * w)
+            )
             yy = np.arange(y0, y1, dtype=float)
             for sigma in (2.0, 5.0):
                 smooth = gaussian_filter(arr, sigma=(2, sigma))
@@ -193,8 +280,10 @@ class SpineModel:
                         valid = (previous >= 0) & (previous < width)
                         options.append(np.where(
                             valid,
-                            score[np.clip(previous, 0, width - 1)] - 0.15 * delta ** 2,
-                            -np.inf))
+                            score[np.clip(previous, 0, width - 1)]
+                            - 0.15 * delta ** 2,
+                            -np.inf,
+                        ))
                     options = np.asarray(options)
                     best = options.argmax(axis=0)
                     back[row] = np.clip(xs + best - 2, 0, width - 1)
@@ -215,15 +304,21 @@ class SpineModel:
                 for section in np.array_split(np.arange(len(xx)), 3):
                     local = np.polyfit(yy[section], xx[section], 1)[0]
                     features.append(abs(np.degrees(np.arctan(local))))
-                sampled = np.interp(np.linspace(0, len(xx) - 1, 12), np.arange(len(xx)), xx)
+                sampled = np.interp(
+                    np.linspace(0, len(xx) - 1, 12),
+                    np.arange(len(xx)), xx,
+                )
                 features.extend(np.abs(sampled - np.median(sampled)) / w)
                 features.extend(np.abs(np.diff(sampled)) / w)
-        return np.asarray(features, dtype=np.float64)
+        result = np.asarray(features, dtype=np.float64)
+        if not np.isfinite(result).all():
+            raise ValueError("[spine] геометрические признаки содержат NaN/Inf")
+        return result
 
     @torch.inference_mode()
-    def _cnn_features(self, img: Image.Image) -> np.ndarray:
-        x = torch.from_numpy(np.array(img, copy=True)).float()[None, None] / 255.0
-        x = x.to(self.device)
+    def _cnn_features(self, img) -> np.ndarray:
+        arr = self._as_gray_unit(img)  # уже [0,1], float64
+        x = torch.from_numpy(arr).float()[None, None].to(self.device)
         if self.encoder_kind == "xrv-densenet121":
             x = (x * 2 - 1) * 1024
         else:
@@ -232,21 +327,27 @@ class SpineModel:
             std = x.new_tensor([0.229, 0.224, 0.225])[None, :, None, None]
             x = (x - mean) / std
         spatial = (self.encoder(x) + self.encoder(x.flip(-1)).flip(-1)) / 2
-        symmetric = torch.cat((spatial.mean(-1), (spatial[..., 0] - spatial[..., 1]).abs()), dim=1)
+        symmetric = torch.cat(
+            (spatial.mean(-1), (spatial[..., 0] - spatial[..., 1]).abs()),
+            dim=1,
+        )
         return symmetric.flatten(1).cpu().numpy().astype(np.float64)
 
     def _predict_estimator(self, state, x: np.ndarray) -> np.ndarray:
         n_geometry = state["n_geometry"]
 
         def array(key):
-            return state[key].numpy()
+            # .cpu() — страховка: тензор может быть на любом устройстве
+            return state[key].cpu().numpy()
 
         if state["kind"] == "forest":
             x = np.asarray(x[:, :n_geometry], dtype=np.float32)
             predictions = []
             for tree in state["trees"]:
-                left, right = tree["left"].numpy(), tree["right"].numpy()
-                feature, threshold = tree["feature"].numpy(), tree["threshold"].numpy()
+                left     = tree["left"].cpu().numpy()
+                right    = tree["right"].cpu().numpy()
+                feature  = tree["feature"].cpu().numpy()
+                threshold = tree["threshold"].cpu().numpy()
                 nodes = np.zeros(len(x), dtype=np.int64)
                 while True:
                     active = np.flatnonzero(left[nodes] != -1)
@@ -255,46 +356,77 @@ class SpineModel:
                     current = nodes[active]
                     nodes[active] = np.where(
                         x[active, feature[current]] <= threshold[current],
-                        left[current], right[current])
-                predictions.append(tree["probability"].numpy()[nodes])
+                        left[current], right[current],
+                    )
+                predictions.append(tree["probability"].cpu().numpy()[nodes])
             return np.mean(predictions, axis=0)
 
-        # LogisticRegression + масштабирование/PCA
         geom = (x[:, :n_geometry] - array("geometry_mean")) / array("geometry_scale")
         if state["features"] == "combined":
             cnn = (x[:, n_geometry:] - array("cnn_mean")) / array("cnn_scale")
             cnn = (cnn - array("pca_mean")) @ array("pca_components").T
             cnn = (cnn - array("pc_mean")) / array("pc_scale")
             geom = np.concatenate((geom, cnn), axis=1)
-        return expit(geom @ array("coef") + state["intercept"])
 
+        # intercept мог быть сохранён как тензор — приводим к float
+        intercept = state["intercept"]
+        if isinstance(intercept, torch.Tensor):
+            intercept = float(intercept.cpu().item())
+        return expit(geom @ array("coef") + intercept)
+    
     def _predict_ensemble(self, x: np.ndarray) -> np.ndarray:
-        return np.mean([self._predict_estimator(s, x) for s in self.states], axis=0)
+        return np.mean(
+            [self._predict_estimator(s, x) for s in self.states], axis=0
+        )
 
     def predict(self, dcm_path: str) -> Dict:
         try:
             arr = load_dicom_minmax(dcm_path)
             img = to_square_gray(arr, self.IMG_SIZE)
+
             geom = self._geometry_features(img)[None, :]
             if self.uses_cnn and self.encoder is not None:
                 cnn = self._cnn_features(img)
                 x = np.concatenate((geom, cnn), axis=1)
             else:
                 x = geom
+
             prob = float(self._predict_ensemble(x)[0])
+            if not np.isfinite(prob):
+                raise ValueError(f"[spine] предсказание не число: {prob!r}")
+
             class_id = 1 if prob >= self.threshold else 0
-            return {
+            result = {
                 "status": "success",
                 "class_id": class_id,
                 "confidence": float(prob) if class_id == 1 else float(1.0 - prob),
-                "probability": float(prob),
+                "probability": prob,
             }
+            if self.debug:
+                result["debug"] = {
+                    "threshold": self.threshold,
+                    "n_features": int(x.shape[1]),
+                    "n_estimators": len(self.states),
+                    "uses_cnn": self.uses_cnn,
+                    "geom_min": float(np.min(geom)),
+                    "geom_max": float(np.max(geom)),
+                }
+            return result
+
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            # Раньше ошибка молча уходила в {"status": "error"} и вызывающий
+            # код её игнорировал — выглядело как «модель ничего не выдаёт».
+            import traceback
+            tb = traceback.format_exc()
+            print(f"❌ [spine] ошибка на {dcm_path}:\n{tb}", flush=True)
+            return {
+                "status": "error",
+                "error": f"{type(e).__name__}: {e}",
+                "traceback": tb if self.debug else None,
+            }
 
 
-# ====================== HIP QUALITY (VERTEL) MODEL ======================
-# Из Pasted text.py: EfficientNet_B0 + side-embedding, 2 выхода
+# HIP QUALITY (VERTEL) MODEL
 # (positioning_rotation, roi_correctness), IMG_SIZE=384.
 
 class _HipQualityNet(nn.Module):
@@ -407,9 +539,8 @@ class HipQualityModel:
             return {"status": "error", "error": str(e)}
 
 
-# ====================== ARTIFACT MODEL ======================
-# Из import os.txt (второй файл): timm.resnet18, 1 выход, sigmoid, порог.
-# Препроцессинг: percentile(1,99) clip → CLAHE → 3 канала → ImageNet normalize.
+# ARTIFACT MODEL 
+
 
 class ArtifactModel:
     IMG_SIZE = 384
@@ -468,7 +599,7 @@ class ArtifactModel:
             return {"status": "error", "error": str(e)}
 
 
-# ====================== POSITION MODEL ======================
+# POSITION MODEL 
 # Классический CV-алгоритм (без весов) — проверка грубых отклонений.
 
 class PositionModel:
@@ -506,7 +637,7 @@ class PositionModel:
             return {"status": "error", "error": str(e)}
 
 
-# ====================== АНАЛИЗАТОР ======================
+# АНАЛИЗАТОР 
 
 class MultiModelAnalyzer:
     def __init__(self, models_dir: Path):
@@ -533,31 +664,24 @@ class MultiModelAnalyzer:
         self._try_load(
             "body_part", BodyPartModel,
             md / "body_part_model" / "weights" / "best_model.pt",
-            md / "body_part_model" / "best_model.pt",
         )
 
         # 2) Spine — ансамбль (RF или LogReg) + опционально CNN
         self._try_load(
             "spine", SpineModel,
             md / "spine_model" / "weights" / "best_model.pt",
-            md / "spine_model" / "best_model.pt",
         )
 
         # 3) Hip quality (vertel) — EfficientNet_B0 + side-embedding
         self._try_load(
             "hip_quality", HipQualityModel,
             md / "vertel_model" / "weights" / "best_hip_quality.pt",
-            md / "vertel_model" / "weights" / "best_model.pt",
-            md / "vertel_model" / "best_hip_quality.pt",
-            md / "vertel_model" / "best_model.pt",
         )
 
         # 4) Artifacts — timm.resnet18, sigmoid
         self._try_load(
             "artifact", ArtifactModel,
             md / "artifact_model" / "weights" / "best_artifact_model.pth",
-            md / "artifact_model" / "weights" / "best_model.pt",
-            md / "artifact_model" / "best_artifact_model.pth",
         )
 
         # 5) Position — CV, без весов
@@ -574,7 +698,7 @@ class MultiModelAnalyzer:
             "hip_side": None,
             "quality_class": 0,
             "quality_prob": 0.0,
-            "violation_prob": 0.0,     # ← сырая вероятность нарушения (для отладки/UI)
+            "violation_prob": 0.0,     
             "violation_type": [],
             "model_predictions": {},
         }
@@ -598,7 +722,7 @@ class MultiModelAnalyzer:
 
         region = results["anatomical_region"]
         violations: List[str] = []
-        violation_probs: List[float] = []   # ← все сырые вероятности нарушений
+        violation_probs: List[float] = []   
 
         # 2) Позвоночник
         if region == "Поясничный отдел позвоночника" and "spine" in self.models:
@@ -621,7 +745,7 @@ class MultiModelAnalyzer:
                         if v not in violations:
                             violations.append(v)
 
-        # 4) Артефакты — всегда
+        #4) Артефакты — всегда
         if "artifact" in self.models:
             pred = self.models["artifact"].predict(dcm_path)
             results["model_predictions"]["artifact"] = pred
@@ -654,7 +778,7 @@ class MultiModelAnalyzer:
         return results
 
 
-# ====================== FASTAPI ======================
+# FASTAPI 
 
 app = FastAPI(title="DXA Multi-Model Analyzer")
 templates = Jinja2Templates(directory="templates")

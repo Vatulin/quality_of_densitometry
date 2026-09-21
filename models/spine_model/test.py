@@ -17,14 +17,14 @@ sys.dont_write_bytecode = True
 import torch
 
 try:
-    from .train import HERE, PREPROCESS, FeaturePredictor, build_model, image_tensor, read_image
+    from .train import DEFAULT_WEIGHTS, HERE, PREPROCESS, FeaturePredictor, build_model, image_tensor, read_image
 except ImportError:
-    from quality_of_densitometry.models.spine_model.train import HERE, PREPROCESS, FeaturePredictor, build_model, image_tensor, read_image
+    from quality_of_densitometry.models.spine_model.train import DEFAULT_WEIGHTS, HERE, PREPROCESS, FeaturePredictor, build_model, image_tensor, read_image
 
 
 class SpinePipeline:
     def __init__(self, first_weights=HERE.parent / "first_model/best_model.pt",
-                 spine_weights=HERE / "best_model.pt", device=None):
+                 spine_weights=DEFAULT_WEIGHTS, device=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.first = build_model().to(self.device)
         self.first.load_state_dict(torch.load(first_weights, map_location="cpu", weights_only=True))
@@ -82,7 +82,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", type=Path)
     parser.add_argument("--first-weights", type=Path, default=HERE.parent / "first_model/best_model.pt")
-    parser.add_argument("--spine-weights", type=Path, default=HERE / "best_model.pt")
+    parser.add_argument("--spine-weights", type=Path, default=DEFAULT_WEIGHTS)
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
     if not args.target.exists():

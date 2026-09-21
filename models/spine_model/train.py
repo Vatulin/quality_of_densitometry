@@ -12,7 +12,8 @@ specificity >= 0.75 (параметры --positive-weights, --beta, --min-specif
 Экстракторы заморожены; на разметке обучается классификатор признаков.
 Выбор модели/порога: повторная групповая CV на development, без test.
 Предобработка, PCA и балансировка обучаются строго внутри train каждого фолда.
-Сохраняется ансамбль фолдов: единственный файл best_model.pt рядом со скриптом.
+Сохраняется ансамбль фолдов: weights/best_model.pt в папке spine_model.
+Другой путь сохранения можно задать через --output.
 Первый запуск может скачать ImageNet-веса в стандартный кеш torchvision.
 Все промежуточные данные остаются в RAM. --epochs/--lr больше не нужны.
 
@@ -49,7 +50,8 @@ from torch import nn
 from torchvision import models
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[2]
+ROOT = HERE.parents[3]
+DEFAULT_WEIGHTS = HERE / "weights" / "best_model.pt"
 IMG_SIZE = 224
 PREPROCESS = "dicom_minmax_square_224_v1"
 FEATURE_VERSION = "spatial_resnet18_ridge_v2"
@@ -420,6 +422,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", type=Path, default=HERE / "datasets/dataset_for_spine_model.csv")
     parser.add_argument("--data-root", type=Path, default=ROOT)
+    parser.add_argument("--output", type=Path, default=DEFAULT_WEIGHTS,
+                        help="Путь сохранения весов (по умолчанию spine_model/weights/best_model.pt)")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--folds", type=int, default=4)
     parser.add_argument("--repeats", type=int, default=2)
@@ -532,7 +536,8 @@ def main():
         "versions": {"torch": str(torch.__version__), "sklearn": sklearn.__version__,
                      "imblearn": imblearn.__version__},
     }
-    output = HERE / "best_model.pt"
+    output = args.output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, output)
     print("TEST (прежняя выборка, только spine_model):", test_metrics)
     print(f"Сохранено: {output}")

@@ -397,6 +397,31 @@ def analyze_image(gray, side="auto"):
                            "Отступы области интереса соответствуют ТЗ")}
 
 
+def analyze_roi(source, side, image_data=None):
+    """Проверить отступы для уже определённой стороны, без повторного инференса."""
+    if side not in ("left", "right"):
+        raise ValueError("Для проверки ROI нужна сторона left или right")
+    gray, meta = read_image(source, data=image_data)
+    report = {"study_uid": meta["study_uid"], "image_uid": meta["image_uid"],
+              "roi_check_performed": True,
+              "expected_lateral_image_edge": "right" if side == "left" else "left"}
+    report.update(analyze_image(gray, side=side))
+    try:
+        _, _, geometric_edge = _landmarks(gray, .12, side="auto")
+    except ValueError:
+        geometric_edge = None
+    report["geometry_lateral_image_edge"] = geometric_edge
+    report["side_geometry_consistent"] = (
+        geometric_edge == report["expected_lateral_image_edge"]
+        if geometric_edge is not None else None
+    )
+    if report["side_geometry_consistent"] is False:
+        report.update(quality_class=None, processing_status="Failure", violation_type=[],
+                      conclusion="Сторона бедра противоречит геометрии изображения: требуется ручная проверка",
+                      error="Возможен зеркальный экспорт или ошибка определения стороны")
+    return report
+
+
 def analyze(source, side="auto", image_data=None, model_path=DEFAULT_MODEL, device="cpu"):
     start = time.perf_counter()
     report = {"path_to_study": str(source), "study_uid": "", "image_uid": "",
@@ -422,23 +447,7 @@ def analyze(source, side="auto", image_data=None, model_path=DEFAULT_MODEL, devi
                       predicted_hip_side=predicted_side,
                       hip_side_source="model" if side == "auto" else "argument",
                       expected_lateral_image_edge="right" if selected_side == "left" else "left")
-        gray, meta = read_image(source, data=data)
-        report.update(study_uid=meta["study_uid"], image_uid=meta["image_uid"])
-        report["roi_check_performed"] = True
-        report.update(analyze_image(gray, side=selected_side))
-        # Независимая проверка геометрии не меняет сторону модели молча.
-        # Она обнаруживает зеркальный экспорт или противоречие классификации.
-        try:
-            _, _, geometric_edge = _landmarks(gray, .12, side="auto")
-        except ValueError:
-            geometric_edge = None
-        report["geometry_lateral_image_edge"] = geometric_edge
-        report["side_geometry_consistent"] = (geometric_edge == report["expected_lateral_image_edge"]
-                                               if geometric_edge is not None else None)
-        if report["side_geometry_consistent"] is False:
-            report.update(quality_class=None, processing_status="Failure", violation_type=[],
-                          conclusion="Сторона бедра противоречит геометрии изображения: требуется ручная проверка",
-                          error="Возможен зеркальный экспорт или ошибка определения стороны")
+        report.update(analyze_roi(source, selected_side, image_data=data))
     except Exception as exc:
         report.update(quality_class=None, processing_status="Failure", violation_type=[],
                       conclusion="Требуется ручная проверка", error=str(exc))

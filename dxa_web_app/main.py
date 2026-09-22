@@ -820,8 +820,8 @@ class MultiModelAnalyzer:
         pred = self._predict("artifact", dcm_path)
         results["model_predictions"]["artifact"] = pred
         violation_probs.append(float(pred.get("probability", 0.0)))
-        if pred["class_id"] > 0 and "Некорректная укладка" not in violations:
-            violations.append("Некорректная укладка")
+        if pred["class_id"] > 0 and "Наличие артефактов" not in violations:
+            violations.append("Наличие артефактов")
 
         # 5) Position (CV) — только бедро; вероятности не даёт, только флаг
         if region == "Проксимальный отдел бедра":

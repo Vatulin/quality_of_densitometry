@@ -15,7 +15,7 @@ import timm
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
-from main import load_and_merge_data
+from quality_of_densitometry.models.sosal.main import load_and_merge_data
 
 # ==========================================
 # 1. Focal Loss

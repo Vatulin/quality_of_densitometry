@@ -1,10 +1,11 @@
-"""Каскад first_model -> spine_model для одного DICOM или папки.
+"""Каскад body_part_model -> spine_model для одного DICOM или папки.
 
 python test.py "путь/к/снимку.dcm"
 python test.py "путь/к/папке"
+Из корня проекта: python src/quality_of_densitometry/models/spine_model/test.py "путь/к/снимку.dcm"
 Для каждого снимка позвоночника выводится только «Да» (>5°) или «Нет» (<=5°).
 Если определено бедро или произошла ошибка, сообщение выводится в stderr.
-first_model различает только spine/hip, а не любые посторонние изображения.
+body_part_model различает spine/hip_right/hip_left, а не любые посторонние изображения.
 """
 
 import argparse
@@ -16,17 +17,23 @@ sys.dont_write_bytecode = True
 
 import torch
 
-try:
+if __package__:
+    from ..body_part_model.test import CLASS_NAMES, build_model as build_body_model, preprocess as preprocess_body
     from .train import DEFAULT_WEIGHTS, HERE, PREPROCESS, FeaturePredictor, build_model, image_tensor, read_image
-except ImportError:
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    from quality_of_densitometry.models.body_part_model.test import CLASS_NAMES, build_model as build_body_model, preprocess as preprocess_body
     from quality_of_densitometry.models.spine_model.train import DEFAULT_WEIGHTS, HERE, PREPROCESS, FeaturePredictor, build_model, image_tensor, read_image
 
 
+DEFAULT_FIRST_WEIGHTS = HERE.parent / "body_part_model" / "weights" / "best_model.pt"
+
+
 class SpinePipeline:
-    def __init__(self, first_weights=HERE.parent / "first_model/best_model.pt",
+    def __init__(self, first_weights=DEFAULT_FIRST_WEIGHTS,
                  spine_weights=DEFAULT_WEIGHTS, device=None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.first = build_model().to(self.device)
+        self.first = build_body_model().to(self.device)
         self.first.load_state_dict(torch.load(first_weights, map_location="cpu", weights_only=True))
         self.first.eval()
         self.spine_weights = Path(spine_weights)
@@ -52,28 +59,30 @@ class SpinePipeline:
     @torch.inference_mode()
     def predict(self, path):
         started = time.perf_counter()
-        image = read_image(path)
-        x = image_tensor(image).unsqueeze(0).to(self.device)
-        probabilities = self.first(x).softmax(1)[0].cpu().tolist()
-        is_spine = probabilities[0] >= probabilities[1]
+        body_x = preprocess_body(path).to(self.device)
+        probabilities = self.first(body_x).softmax(1)[0].cpu().tolist()
+        body_class = CLASS_NAMES[max(range(len(probabilities)), key=probabilities.__getitem__)]
+        is_spine = body_class == "spine"
         result = {
             "path": str(path), "anatomical_region": "spine" if is_spine else "hip",
-            "spine_score": probabilities[0], "quality_class": None,
+            "spine_score": probabilities[CLASS_NAMES.index("spine")], "quality_class": None,
             "tilt_score": None, "threshold": None, "violation_type": None,
             "processing_status": "Success",
         }
         if is_spine:
+            image = read_image(path)
             if self.spine is None:
                 self._load_spine()
             if isinstance(self.spine, FeaturePredictor):
                 score = self.spine.predict(image)
             else:
+                x = image_tensor(image).unsqueeze(0).to(self.device)
                 score = float(self.spine((x - 0.5) / 0.5).softmax(1)[0, 1].item())
             defect = int(score >= self.threshold)
             result.update(quality_class=defect, tilt_score=score, threshold=self.threshold,
                           violation_type="spine_tilt_gt_5" if defect else "none")
         else:
-            result["message"] = "Наклон не оценивался: first_model определила бедро"
+            result["message"] = "Наклон не оценивался: body_part_model определила бедро"
         result["time_of_processing"] = round(time.perf_counter() - started, 4)
         return result
 
@@ -81,7 +90,7 @@ class SpinePipeline:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", type=Path)
-    parser.add_argument("--first-weights", type=Path, default=HERE.parent / "first_model/best_model.pt")
+    parser.add_argument("--first-weights", type=Path, default=DEFAULT_FIRST_WEIGHTS)
     parser.add_argument("--spine-weights", type=Path, default=DEFAULT_WEIGHTS)
     parser.add_argument("--device", default=None)
     args = parser.parse_args()
@@ -95,7 +104,7 @@ def main():
     try:
         pipeline = SpinePipeline(args.first_weights, args.spine_weights, args.device)
     except Exception as exc:
-        parser.exit(1, f"Ошибка загрузки first_model: {exc}\n")
+        parser.exit(1, f"Ошибка загрузки body_part_model: {exc}\n")
     failures = 0
     for path in files:
         try:

@@ -543,6 +543,7 @@ class HipQualityModel:
 
 
 class ArtifactModel:
+    MODEL_NAME = "artifact"
     IMG_SIZE = 384
     MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
     STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
@@ -553,7 +554,7 @@ class ArtifactModel:
         try:
             import timm
         except ImportError as e:
-            raise ImportError("Для artifact_model нужен timm: pip install timm") from e
+            raise ImportError(f"Для {self.MODEL_NAME}_model нужен timm: pip install timm") from e
 
         self.model = timm.create_model("resnet18", pretrained=False, num_classes=1)
         ckpt = torch.load(self.weights_path, map_location=self.device, weights_only=False)
@@ -564,7 +565,7 @@ class ArtifactModel:
             self.model.load_state_dict(ckpt)
             self.threshold = 0.5
         self.model.to(self.device).eval()
-        print(f"✅ [artifact] загружено: {self.weights_path} (threshold={self.threshold:.3f})")
+        print(f"✅ [{self.MODEL_NAME}] загружено: {self.weights_path} (threshold={self.threshold:.3f})")
 
     @staticmethod
     def _read_dxa(dcm_path) -> np.ndarray:
@@ -597,6 +598,25 @@ class ArtifactModel:
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}
+
+
+class SpinePositionModel(ArtifactModel):
+    """ResNet18 с предобработкой из spine_position_model/train.py."""
+
+    MODEL_NAME = "spine_position"
+    IMG_SIZE = 256
+
+    @staticmethod
+    def _read_dxa(dcm_path) -> np.ndarray:
+        ds = pydicom.dcmread(str(dcm_path))
+        img = ds.pixel_array.astype(np.float32)
+        if getattr(ds, "PhotometricInterpretation", "") == "MONOCHROME1":
+            img = img.max() - img
+        if img.max() > img.min():
+            img = (img - img.min()) / (img.max() - img.min()) * 255.0
+        else:
+            img = np.zeros_like(img)
+        return np.stack([img.astype(np.uint8)] * 3, axis=-1)
 
 
 # POSITION MODEL 
@@ -672,6 +692,11 @@ class MultiModelAnalyzer:
             md / "spine_model" / "weights" / "best_model.pt",
         )
 
+        self._try_load(
+            "spine_position", SpinePositionModel,
+            md / "spine_position_model" / "final_spine_model.pth",
+        )
+
         # 3) Hip quality (vertel) — EfficientNet_B0 + side-embedding
         self._try_load(
             "hip_quality", HipQualityModel,
@@ -732,6 +757,14 @@ class MultiModelAnalyzer:
                 violation_probs.append(float(pred.get("probability", 0.0)))
                 if pred["class_id"] == 1:
                     violations.append("Не выравнена ось позвоночника")
+
+        if region == "Поясничный отдел позвоночника" and "spine_position" in self.models:
+            pred = self.models["spine_position"].predict(dcm_path)
+            results["model_predictions"]["spine_position"] = pred
+            if pred["status"] == "success":
+                violation_probs.append(float(pred.get("probability", 0.0)))
+                if pred["class_id"] == 1:
+                    violations.append("Некорректная укладка позвоночника")
 
         # 3) Бедро
         if region == "Проксимальный отдел бедра" and "hip_quality" in self.models:

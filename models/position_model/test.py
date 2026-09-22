@@ -1,9 +1,10 @@
 """Классификация части тела, затем CV-проверка отступов ROI бедра.
 
-Пример: python -B test.py ../../../Data/Тест/CR000001_ЛПОБ.dcm --side left
+Пример из папки position_model:
+python -B test.py Тест/CR000001_ЛПОБ.dcm --side left
 Прямая HTTP(S)-ссылка должна возвращать снимок, а не страницу облачного диска.
 Вывод JSON (по умолчанию) или CSV в stdout; новых файлов нет.
-Сначала first_model/best_model.pt определяет spine/hip_right/hip_left.
+Сначала body_part_model/weights/best_model.pt определяет spine/hip_right/hip_left.
 Для spine проверка отступов бедра пропускается. Сторона бедра берётся
 из предсказания модели и управляет поиском наружного края. --side позволяет
 явно переопределить сторону; противоречие геометрии требует ручной проверки.
@@ -24,10 +25,10 @@ from pathlib import Path
 if __package__:
     from .train import analyze, resolve_image, DEFAULT_MODEL
 else:
-    from quality_of_densitometry.models.position_model.train import analyze, resolve_image, DEFAULT_MODEL
+    from train import analyze, resolve_image, DEFAULT_MODEL
 
 def predict(source, side="auto", model_path=DEFAULT_MODEL, device="cpu"):
-    """Тот же конвейер first_model -> CV, что при оценке датасета в train.py."""
+    """Тот же конвейер body_part_model -> CV, что при оценке датасета в train.py."""
     return analyze(source, side=side, model_path=model_path, device=device)
 
 
@@ -35,7 +36,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", help="Путь, rel_path из датасета, file:// или прямая HTTP(S)-ссылка")
     parser.add_argument("--side", choices=("auto", "left", "right"), default="auto",
-                        help="Сторона для поиска ROI: auto — из first_model; left/right — явное указание")
+                        help="Сторона для поиска ROI: auto — из body_part_model; left/right — явное указание")
     parser.add_argument("--format", choices=("json", "csv"), default="json")
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="Веса модели spine/hip_right/hip_left")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")

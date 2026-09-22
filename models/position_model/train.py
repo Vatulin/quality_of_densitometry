@@ -1,4 +1,4 @@
-"""first_model определяет часть тела/сторону; отступы измеряются классическим CV.
+"""body_part_model определяет часть тела/сторону; отступы измеряются классическим CV.
 
 ТЗ.pdf, п. 2.3, рис. 6: >=30 мм над большим вертелом, >=30 мм под
 седалищной костью, >=20 мм с наружной стороны бедра. Не использовать
@@ -7,7 +7,7 @@ bounding box всей кости: диафиз закономерно доход
 
 Алгоритм: нормализация яркости, Gaussian blur, порог по Otsu (три уровня),
 морфологическое замыкание, удаление мелких компонент; поиск диафиза в нижней
-части кадра, выбор наружного края по стороне из first_model,
+части кадра, выбор наружного края по стороне из body_part_model,
 верхняя огибающая большого вертела и нижний отдельный медиальный
 контур седалищной кости. Согласованность трёх сегментаций проверяется в мм.
 Это эвристические анатомические ориентиры, не гарантированная сегментация.
@@ -19,10 +19,10 @@ bounding box всей кости: диафиз закономерно доход
 краю изображения, hip_right — левому. Произвольные зеркальные экспорты
 требуют проверки этой конвенции. side влияет на поиск, а не только на отчёт.
 analyze_image(gray, side='auto') сохраняет чистый CV-режим для сравнения;
-analyze и evaluate всегда сначала вызывают first_model.
+analyze и evaluate всегда сначала вызывают body_part_model.
 
 Зависимости: numpy, opencv-python, pydicom, torch, torchvision, pillow.
-python -B train.py --evaluate --data-root ../../../Data
+python -B train.py --evaluate
 CSV/JSON печатаются в stdout; файлы и обученные модели не создаются.
 При предсказании CSV, имена файлов и метки не используются. Текущий датасет
 использовался для разработки эвристики: метрики на нём не независимые.
@@ -51,7 +51,7 @@ import numpy as np
 import pydicom
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_ROOT = HERE.parents[2] / "Data"
+DEFAULT_ROOT = HERE.parents[3] / "Data"
 SPACING_X = 0.6
 SPACING_Y = 1.05
 REQUIRED_MM = {"top": 30.0, "bottom": 30.0, "lateral": 20.0}
@@ -59,13 +59,14 @@ MAX_BYTES = 64 * 1024 * 1024
 CONTOUR_FACTORS = (.08, .12, .16)
 
 
-DEFAULT_MODEL = Path(__file__).resolve().parent.parent / "first_model/best_model.pt"
+BODY_MODEL_DIR = HERE.parent / "body_part_model"
+DEFAULT_MODEL = BODY_MODEL_DIR / "weights" / "best_model.pt"
 
 
 @lru_cache(maxsize=1)
 def body_model_module():
     """Единый источник архитектуры, порядка классов и размера входа."""
-    path = DEFAULT_MODEL.parent / "test.py"
+    path = BODY_MODEL_DIR / "test.py"
     spec = importlib.util.spec_from_file_location("_position_body_model", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Невозможно загрузить модуль классификатора: {path}")
@@ -84,7 +85,7 @@ def _load_body_model(path, device, modified_ns, size_bytes):
 
 
 def classify_body_part(data, model_path=DEFAULT_MODEL, device="cpu"):
-    """Та же архитектура и preprocessing, что в first_model/test.py.
+    """Та же архитектура и preprocessing, что в body_part_model/test.py.
 
     Min/max исходного pixel_array, чёрный квадрат, bilinear до IMG_SIZE.
     Предобработка CV здесь не используется: это изменило бы вход модели.
@@ -99,7 +100,7 @@ def classify_body_part(data, model_path=DEFAULT_MODEL, device="cpu"):
     classifier = body_model_module()
     class_names = tuple(classifier.CLASS_NAMES)
     if set(class_names) != {"spine", "hip_right", "hip_left"} or len(class_names) != 3:
-        raise ValueError(f"Неожиданные классы first_model: {class_names}")
+        raise ValueError(f"Неожиданные классы body_part_model: {class_names}")
 
     raster = data.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8", b"BM", b"II*\x00", b"MM\x00*"))
     if raster:
@@ -227,7 +228,7 @@ def _landmarks(gray, factor, side="auto"):
             shafts.append(runs[0])
         elif runs and side != "auto":
             # Когда внизу ещё виден таз, диафиз ищем с наружной стороны,
-            # известной по first_model, а не отбрасываем всю строку.
+            # известной по body_part_model, а не отбрасываем всю строку.
             shafts.append((max if side == "left" else min)(runs, key=lambda r: r[0]+r[1]))
     if len(shafts) < h * .08:
         raise ValueError("Диафиз не выделен однозначно: возможен обрезанный/повёрнутый кадр")
@@ -507,7 +508,7 @@ def evaluate(csv_path, data_root, limit=None, model_path=DEFAULT_MODEL, device="
     positive_total = sum(x["reference_position_defects"] == "1" for x in reports)
     negative_total = sum(x["reference_position_defects"] == "0" for x in reports)
     return {"total": len(reports), "evaluated": len(truth), "manual_review": len(reports)-len(truth),
-            "side_source": "first_model", "model_path": str(model_path),
+            "side_source": "body_part_model", "model_path": str(model_path),
             "side_compared": sum(r["side_matches_reference"] is not None for r in reports),
             "side_mismatches": sum(r["side_matches_reference"] is False for r in reports),
             "reference_defects_total": positive_total,
@@ -528,7 +529,7 @@ def main():
     parser.add_argument("--csv", type=Path, default=HERE / "datasets/dataset_for_position.csv")
     parser.add_argument("--data-root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--limit", type=int)
-    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="Веса first_model")
+    parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="Веса body_part_model")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     args = parser.parse_args()
     if not args.evaluate:

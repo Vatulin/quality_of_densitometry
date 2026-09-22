@@ -1,0 +1,25 @@
+# Virtual enviroment
+.venv
+
+# Special
+НД_для_обучения/
+разметка.xlsx
+uploads/
+
+# Common
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.git/
+.gitignore
+.ipynb_checkpoints/
+*.ipynb
+datasets/
+uploads/
+ckpt_hip_quality/
+*.log
+.DS_Store
+.pytest_cache/
+.mypy_cache/

@@ -1,5 +1,6 @@
 import uuid
 import zipfile
+from time import perf_counter
 import cv2
 import numpy as np
 import pandas as pd
@@ -663,6 +664,7 @@ class MultiModelAnalyzer:
     def __init__(self, models_dir: Path):
         self.models_dir = models_dir
         self.models: Dict[str, object] = {}
+        self.model_load_errors: Dict[str, str] = {}
         self._load_models()
 
     def _try_load(self, name: str, cls, *paths) -> bool:
@@ -673,7 +675,9 @@ class MultiModelAnalyzer:
                     self.models[name] = cls(str(p))
                     return True
                 except Exception as e:
+                    self.model_load_errors[name] = f"{type(e).__name__}: {e}"
                     print(f"⚠️ [{name}] не удалось загрузить {p}: {e}")
+        self.model_load_errors.setdefault(name, "Файл весов не найден")
         print(f"⚠️ [{name}] веса не найдены: {[str(p) for p in paths]}")
         return False
 
@@ -716,9 +720,43 @@ class MultiModelAnalyzer:
 
         print(f"✅ Всего успешно загружено моделей: {len(self.models)}")
 
+    def _predict(self, name: str, dcm_path: str, **kwargs) -> Dict:
+        if name not in self.models:
+            reason = self.model_load_errors.get(name, "Модель не загружена")
+            raise RuntimeError(f"{name}: {reason}")
+        try:
+            prediction = self.models[name].predict(dcm_path, **kwargs)
+            if not isinstance(prediction, dict):
+                raise ValueError("Модель вернула некорректный результат")
+            if prediction.get("status") != "success":
+                raise RuntimeError(prediction.get("error") or "Ошибка модели без описания")
+            return prediction
+        except Exception as e:
+            raise RuntimeError(f"{name}: {e}") from e
+
     def analyze(self, dcm_path: str) -> Dict:
+        started = perf_counter()
+        metadata = {"study_uid": "", "image_uid": ""}
+        try:
+            ds = pydicom.dcmread(dcm_path, stop_before_pixels=True)
+            metadata = {
+                "study_uid": str(getattr(ds, "StudyInstanceUID", "")),
+                "image_uid": str(getattr(ds, "SOPInstanceUID", "")),
+            }
+            result = self._analyze(dcm_path)
+        except Exception as e:
+            result = failed_result(dcm_path, e)
+        result.update(metadata)
+        result["path_to_study"] = str(dcm_path)
+        result["time_of_processing"] = round(perf_counter() - started, 6)
+        return result
+
+    def _analyze(self, dcm_path: str) -> Dict:
         results = {
             "filename": Path(dcm_path).name,
+            "path": str(dcm_path),
+            "processing_status": "Success",
+            "error_message": "",
             "anatomical_region": None,
             "hip_side": None,
             "quality_class": 0,
@@ -730,36 +768,36 @@ class MultiModelAnalyzer:
 
         # 1) Часть тела и сторона
         hip_side = None
-        if "body_part" in self.models:
-            pred = self.models["body_part"].predict(dcm_path)
-            results["model_predictions"]["body_part"] = pred
-            if pred["status"] == "success":
-                name = pred.get("class_name")
-                if name == "spine":
-                    results["anatomical_region"] = "Поясничный отдел позвоночника"
-                elif name == "hip_right":
-                    results["anatomical_region"] = "Проксимальный отдел бедра"
-                    hip_side = "right"
-                elif name == "hip_left":
-                    results["anatomical_region"] = "Проксимальный отдел бедра"
-                    hip_side = "left"
+        pred = self._predict("body_part", dcm_path)
+        results["model_predictions"]["body_part"] = pred
+        name = pred.get("class_name")
+        if name == "spine":
+            results["anatomical_region"] = "Поясничный отдел позвоночника"
+        elif name == "hip_right":
+            results["anatomical_region"] = "Проксимальный отдел бедра"
+            hip_side = "right"
+        elif name == "hip_left":
+            results["anatomical_region"] = "Проксимальный отдел бедра"
+            hip_side = "left"
         results["hip_side"] = hip_side
 
         region = results["anatomical_region"]
+        if region is None:
+            raise ValueError("body_part: неизвестная анатомическая область")
         violations: List[str] = []
         violation_probs: List[float] = []   
 
         # 2) Позвоночник
-        if region == "Поясничный отдел позвоночника" and "spine" in self.models:
-            pred = self.models["spine"].predict(dcm_path)
+        if region == "Поясничный отдел позвоночника":
+            pred = self._predict("spine", dcm_path)
             results["model_predictions"]["spine"] = pred
             if pred["status"] == "success":
                 violation_probs.append(float(pred.get("probability", 0.0)))
                 if pred["class_id"] == 1:
                     violations.append("Не выравнена ось позвоночника")
 
-        if region == "Поясничный отдел позвоночника" and "spine_position" in self.models:
-            pred = self.models["spine_position"].predict(dcm_path)
+        if region == "Поясничный отдел позвоночника":
+            pred = self._predict("spine_position", dcm_path)
             results["model_predictions"]["spine_position"] = pred
             if pred["status"] == "success":
                 violation_probs.append(float(pred.get("probability", 0.0)))
@@ -767,8 +805,8 @@ class MultiModelAnalyzer:
                     violations.append("Некорректная укладка позвоночника")
 
         # 3) Бедро
-        if region == "Проксимальный отдел бедра" and "hip_quality" in self.models:
-            pred = self.models["hip_quality"].predict(dcm_path, side=hip_side)
+        if region == "Проксимальный отдел бедра":
+            pred = self._predict("hip_quality", dcm_path, side=hip_side)
             results["model_predictions"]["hip_quality"] = pred
             if pred["status"] == "success":
                 for p in pred.get("probabilities", []):
@@ -779,17 +817,15 @@ class MultiModelAnalyzer:
                             violations.append(v)
 
         #4) Артефакты — всегда
-        if "artifact" in self.models:
-            pred = self.models["artifact"].predict(dcm_path)
-            results["model_predictions"]["artifact"] = pred
-            if pred["status"] == "success":
-                violation_probs.append(float(pred.get("probability", 0.0)))
-                if pred["class_id"] > 0 and "Некорректная укладка" not in violations:
-                    violations.append("Некорректная укладка")
+        pred = self._predict("artifact", dcm_path)
+        results["model_predictions"]["artifact"] = pred
+        violation_probs.append(float(pred.get("probability", 0.0)))
+        if pred["class_id"] > 0 and "Некорректная укладка" not in violations:
+            violations.append("Некорректная укладка")
 
         # 5) Position (CV) — только бедро; вероятности не даёт, только флаг
-        if "position" in self.models and region == "Проксимальный отдел бедра":
-            pred = self.models["position"].predict(dcm_path, body_part="hip")
+        if region == "Проксимальный отдел бедра":
+            pred = self._predict("position", dcm_path, body_part="hip")
             results["model_predictions"]["position"] = pred
             if pred["status"] == "success" and pred["class_id"] == 1:
                 for v in pred.get("violations", []):
@@ -809,6 +845,27 @@ class MultiModelAnalyzer:
             results["quality_prob"] = float(1.0 - max_violation_prob)  # ← уверенность «всё ОК»
 
         return results
+
+
+def failed_result(dcm_path: str, error: Exception) -> Dict:
+    """Техническая ошибка не является оценкой качества изображения."""
+    return {
+        "filename": Path(dcm_path).name,
+        "path": str(dcm_path),
+        "path_to_study": str(dcm_path),
+        "study_uid": "",
+        "image_uid": "",
+        "time_of_processing": 0.0,
+        "anatomical_region": None,
+        "hip_side": None,
+        "quality_class": None,
+        "quality_prob": None,
+        "violation_prob": None,
+        "violation_type": [],
+        "model_predictions": {},
+        "processing_status": "Failure",
+        "error_message": f"{type(error).__name__}: {error}",
+    }
 
 
 # FASTAPI 
@@ -840,55 +897,85 @@ async def read_root(request: Request):
 
 
 @app.post("/api/analyze")
-async def analyze_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    if not file.filename:
-        return {"error": "Файл не выбран"}
+async def analyze_file(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] | None = File(None),
+    file: UploadFile | None = File(None),
+):
+    uploads = list(files or [])
+    if file is not None:  # Совместимость с прежними клиентами API.
+        uploads.append(file)
+    if not uploads or any(not upload.filename for upload in uploads):
+        return {"error": "Выберите файлы DICOM или ZIP-архивы"}
     task_id = str(uuid.uuid4())
-    file_path = UPLOAD_DIR / f"{task_id}_{file.filename}"
-    with open(file_path, "wb") as f:
-        f.write(await file.read())
-    tasks[task_id] = {"status": "PROCESSING", "progress": 0, "total": 1, "results": []}
-    if file.filename.lower().endswith(".zip"):
-        background_tasks.add_task(process_zip_with_models, task_id, file_path)
-    else:
-        background_tasks.add_task(process_single_file, task_id, file_path)
+    saved_files = []
+    for index, upload in enumerate(uploads, 1):
+        filename = Path(upload.filename.replace("\\", "/")).name
+        if filename in {"", ".", ".."}:
+            return {"error": "Некорректное имя файла"}
+        directory = UPLOAD_DIR / task_id / str(index)
+        directory.mkdir(parents=True, exist_ok=True)
+        file_path = directory / filename
+        with file_path.open("wb") as output:
+            while chunk := await upload.read(1024 * 1024):
+                output.write(chunk)
+        await upload.close()
+        saved_files.append(file_path)
+    tasks[task_id] = {"status": "PROCESSING", "progress": 0, "total": 0, "results": []}
+    background_tasks.add_task(process_files, task_id, saved_files)
     return {"task_id": task_id}
 
 
-def process_single_file(task_id: str, file_path: Path):
+def analyze_safely(file_path: Path) -> Dict:
+    started = perf_counter()
     try:
         if analyzer is None:
             raise Exception("Анализатор не инициализирован")
-        result = analyzer.analyze(str(file_path))
-        tasks[task_id]["results"] = [result]
-        tasks[task_id]["progress"] = 1
-        tasks[task_id]["total"] = 1
-        tasks[task_id]["status"] = "COMPLETED"
+        return analyzer.analyze(str(file_path))
     except Exception as e:
-        tasks[task_id]["status"] = "FAILED"
-        tasks[task_id]["error"] = str(e)
+        result = failed_result(str(file_path), e)
+        result["time_of_processing"] = round(perf_counter() - started, 6)
+        return result
+
+
+def process_single_file(task_id: str, file_path: Path):
+    process_files(task_id, [file_path])
 
 
 def process_zip_with_models(task_id: str, zip_path: Path):
-    try:
-        if analyzer is None:
-            raise Exception("Анализатор не инициализирован")
-        extract_dir = UPLOAD_DIR / task_id
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(extract_dir)
-        dcm_files = list(extract_dir.rglob("*.dcm")) + list(extract_dir.rglob("*.dicom"))
-        tasks[task_id]["total"] = len(dcm_files)
-        results = []
-        for i, dcm_file in enumerate(dcm_files):
-            result = analyzer.analyze(str(dcm_file))
-            result["path"] = dcm_file.relative_to(extract_dir).as_posix()
-            results.append(result)
-            tasks[task_id]["progress"] = i + 1
-        tasks[task_id]["results"] = results
-        tasks[task_id]["status"] = "COMPLETED"
-    except Exception as e:
-        tasks[task_id]["status"] = "FAILED"
-        tasks[task_id]["error"] = str(e)
+    process_files(task_id, [zip_path])
+
+
+def process_files(task_id: str, file_paths: List[Path]):
+    task = tasks[task_id]
+    pending = []
+    for file_path in file_paths:
+        started = perf_counter()
+        try:
+            if file_path.suffix.lower() == ".zip":
+                extract_dir = file_path.parent / (file_path.name + "_contents")
+                with zipfile.ZipFile(file_path, "r") as archive:
+                    archive.extractall(extract_dir)
+                images = sorted(p for p in extract_dir.rglob("*")
+                                if p.is_file() and p.suffix.lower() in {".dcm", ".dicom"})
+                if not images:
+                    raise ValueError("В архиве нет DICOM-файлов (.dcm, .dicom)")
+                pending.extend((p, None) for p in images)
+            else:
+                pending.append((file_path, None))
+        except Exception as e:
+            result = failed_result(str(file_path), e)
+            result["time_of_processing"] = round(perf_counter() - started, 6)
+            pending.append((file_path, result))
+    task["total"] = len(pending)
+    task["results"] = []
+    for file_path, failure in pending:
+        result = failure if failure is not None else analyze_safely(file_path)
+        result["path_to_study"] = str(file_path)
+        result["path"] = str(file_path)
+        task["results"].append(result)
+        task["progress"] += 1
+    task["status"] = "COMPLETED"
 
 
 @app.get("/api/status/{task_id}")
@@ -902,20 +989,24 @@ async def download_result(task_id: str):
     if not task or task["status"] != "COMPLETED":
         return {"error": "Результат еще не готов"}
 
-    side_ru = {"right": "Правый", "left": "Левый"}
+    columns = ["path_to_study", "study_uid", "image_uid", "anatomical_region",
+               "quality_class", "violation_type", "processing_status", "time_of_processing",
+               "error_message"]
     rows = []
     for result in task["results"]:
         rows.append({
-            "filename": result["filename"],
-            "path": result.get("path", ""),
+            "path_to_study": result["path_to_study"],
+            "study_uid": result["study_uid"],
+            "image_uid": result["image_uid"],
             "anatomical_region": result["anatomical_region"] or "",
-            "hip_side": side_ru.get(result.get("hip_side"), ""),
             "quality_class": result["quality_class"],
-            "quality_prob": round(result["quality_prob"], 4),
-            "violation_prob": round(result.get("violation_prob", 0.0), 4),
             "violation_type": ";".join(result["violation_type"]) if result["violation_type"] else "",
+            "processing_status": result["processing_status"],
+            "time_of_processing": result["time_of_processing"],
+            "error_message": result["error_message"],
         })
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(rows, columns=columns)
+    df["quality_class"] = pd.array(df["quality_class"], dtype="Int64")
     csv_path = UPLOAD_DIR / f"{task_id}_result.csv"
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     return FileResponse(csv_path, filename=f"results_{task_id}.csv", media_type="text/csv")

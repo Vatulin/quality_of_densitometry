@@ -195,7 +195,14 @@
             document.getElementById('progress-bar').style.width = `${percent}%`;
         }
 
+        let displayedResults = [];
+        window.addEventListener('conclusion-updated', event => {
+            if (event.detail.taskId !== currentTaskId) return;
+            displayedResults[event.detail.index] = event.detail.row;
+            showResults(displayedResults);
+        });
         function showResults(results) {
+            displayedResults = results;
             document.getElementById('results-section').classList.remove('hidden');
             const tbody = document.getElementById('results-table-body');
             tbody.innerHTML = '';
@@ -231,7 +238,9 @@
                     ? (row.quality_prob * 100).toFixed(1) + '%'
                     : '-';
 
-                const message = failed
+                const message = row.manually_reviewed
+                    ? 'Изменено вручную: ' + (row.violation_type.join('; ') || 'нарушения отменены')
+                    : failed
                     ? (row.error_message || 'Не удалось завершить анализ')
                     : violations;
                 const values = [row.filename, row.path_to_study || row.path, region,

@@ -22,6 +22,16 @@
         <button id="study-close" type="button" class="px-4 py-2 rounded border" aria-label="Закрыть исследование">Закрыть</button>
     </div>
     <p id="study-summary"></p>
+    <section id="study-review" hidden class="border rounded-lg p-4 mb-4">
+        <h3 class="font-semibold">Корректировка заключения</h3>
+        <p class="text-sm my-2">Снимите отметку, чтобы отменить нарушение. Можно восстановить отменённые пункты. Изменяется только заключение; изображения и результаты моделей сохраняются.</p>
+        <fieldset id="study-review-fields"></fieldset>
+        <div class="flex flex-wrap gap-3 mt-3">
+            <button id="study-review-save" type="button" class="bg-blue-600 text-white rounded px-4 py-2">Сохранить заключение</button>
+            <button id="study-review-reset" type="button" class="border rounded px-4 py-2">Вернуть заключение модели</button>
+        </div>
+        <p id="study-review-state" role="status" aria-live="polite" class="mt-2"></p>
+    </section>
     <p id="study-state" role="status" aria-live="polite"></p>
     <p id="study-warnings"></p>
     <div id="study-view" hidden>
@@ -35,6 +45,7 @@
             <figure><figcaption>Исходное изображение</figcaption><img id="study-original" alt="Исходный снимок DICOM"></figure>
             <figure id="study-result-figure"><figcaption>Визуализация нарушения</figcaption><img id="study-result" alt="Визуализация обнаруженного нарушения"></figure>
         </div>
+        <p class="text-sm mt-2">Визуализации показывают исходные отметки модели, включая нарушения, отменённые в заключении вручную.</p>
         <div id="study-legend" hidden aria-label="Легенда визуализации">
             <div id="study-heatmap-legend" hidden>
                 <p>Относительная чувствительность модели</p>
@@ -57,6 +68,63 @@
     const dialog = el('study-dialog');
     let controller = null;
     let data = null;
+    let reviewContext = null;
+    function configureReview(row, index, taskId) {
+        reviewContext = {row, index, taskId};
+        const original = row.model_conclusion || row;
+        el('study-review').hidden = row.processing_status !== 'Success';
+        el('study-review-fields').replaceChildren();
+        el('study-review-fields').disabled = false;
+        for (const violation of original.violation_type || []) {
+            const label = document.createElement('label');
+            label.style.display = 'block';
+            label.style.margin = '8px 0';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.value = violation;
+            checkbox.checked = row.violation_type.includes(violation);
+            label.append(checkbox, document.createTextNode(' ' + violation));
+            el('study-review-fields').append(label);
+        }
+        const empty = !(original.violation_type || []).length;
+        el('study-review-save').disabled = empty;
+        el('study-review-reset').disabled = empty;
+        el('study-review-state').textContent = empty ? 'Модель не отметила нарушений для отмены.' :
+            row.manually_reviewed ? 'Заключение изменено вручную.' : 'Действует исходное заключение модели.';
+    }
+    async function saveReview(reset) {
+        const context = reviewContext;
+        const {row, index, taskId} = context;
+        const violations = reset ? (row.model_conclusion || row).violation_type :
+            Array.from(el('study-review-fields').querySelectorAll('input:checked'), input => input.value);
+        el('study-review-fields').disabled = true;
+        el('study-review-save').disabled = true;
+        el('study-review-reset').disabled = true;
+        el('study-review-state').textContent = 'Сохранение…';
+        try {
+            const response = await fetch(`/api/conclusion/${encodeURIComponent(taskId)}/${index}`, {
+                method: 'PUT', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({violations, revision: row.review_revision || 0})
+            });
+            const updated = await response.json();
+            if (!response.ok) throw new Error(typeof updated.detail === 'string' ? updated.detail : 'Не удалось сохранить заключение');
+            window.dispatchEvent(new CustomEvent('conclusion-updated', {detail: {taskId, index, row: updated}}));
+            if (dialog.open && reviewContext === context) {
+                window.showStudy(updated, index, taskId);
+                el('study-review-state').textContent = reset ? 'Заключение модели восстановлено.' : 'Заключение сохранено.';
+            }
+        } catch (error) {
+            if (reviewContext === context) el('study-review-state').textContent = error.message;
+        } finally {
+            if (reviewContext === context) {
+                el('study-review-fields').disabled = false;
+                el('study-review-save').disabled = false;
+                el('study-review-reset').disabled = false;
+            }
+        }
+    }
+    el('study-review-save').onclick = () => saveReview(false);
+    el('study-review-reset').onclick = () => saveReview(true);
     function draw() {
         const item = data?.items[Number(el('study-layer').value)];
         el('study-result').src = item && el('study-overlay').checked ? item.image : data.original;
@@ -92,6 +160,7 @@
     el('study-layer').onchange = draw;
     el('study-overlay').onchange = draw;
     window.showStudy = async (row, index, taskId) => {
+        configureReview(row, index, taskId);
         controller?.abort();
         const request = new AbortController();
         controller = request;
@@ -103,6 +172,8 @@
             `Область: ${row.anatomical_region || 'не определена'}${row.hip_side ? (row.hip_side === 'right' ? ' (справа)' : ' (слева)') : ''}`,
             `Результат: ${failed ? 'ошибка обработки' : row.quality_class === 1 ? 'обнаружены нарушения' : 'нарушения не обнаружены'}`,
             `Вероятность класса: ${probability}`,
+            `Источник заключения: ${row.manually_reviewed ? 'ручная корректировка' : 'модель'}`,
+            ...(row.manually_reviewed ? [`Исходное заключение модели: ${row.model_conclusion.violation_type.join('; ')}`] : []),
             ...(row.violation_type || []),
             ...(failed ? [row.error_message || 'Анализ не завершён'] : []),
             `Study UID: ${row.study_uid || '—'}`,

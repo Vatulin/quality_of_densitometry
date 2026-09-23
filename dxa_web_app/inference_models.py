@@ -618,6 +618,9 @@ class PositionModel:
         "bottom_margin_too_small": "Недостаточный нижний отступ ROI (менее 30 мм)",
         "lateral_margin_too_small": "Недостаточный боковой отступ ROI (менее 20 мм)",
         "incomplete_roi_at_bottom": "Область интереса неполна у нижней границы изображения",
+        "top_margin_borderline": "Возможен дефект ROI: верхний отступ около порога 30 мм",
+        "bottom_margin_borderline": "Возможен дефект ROI: нижний отступ около порога 30 мм",
+        "lateral_margin_borderline": "Возможен дефект ROI: боковой отступ около порога 20 мм",
     }
 
     def __init__(self, module_path: str):

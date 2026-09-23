@@ -92,6 +92,7 @@
         </div>
     </div>
 
+    {% include 'visualization.html' %}
         <script>
         const dropZone = document.getElementById('drop-zone');
         const fileInput = document.getElementById('file-input');
@@ -199,8 +200,11 @@
             const tbody = document.getElementById('results-table-body');
             tbody.innerHTML = '';
 
-            results.forEach(row => {
+            const resultTaskId = currentTaskId;
+            results.forEach((row, rowIndex) => {
                 const tr = document.createElement('tr');
+                tr.className = 'cursor-pointer hover:bg-blue-50';
+                tr.addEventListener('click', () => showStudy(row, rowIndex, resultTaskId));
 
                 const failed = row.processing_status !== 'Success'
                     || ![0, 1].includes(row.quality_class);
@@ -238,9 +242,16 @@
                     td.className = 'px-6 py-4';
                     td.textContent = value ?? '-';
                     if (index === 3) td.innerHTML = qualityClass;
+                    if (index === 0) {
+                        const button = document.createElement('button');
+                        button.type = 'button';
+                        button.className = 'text-blue-700 underline text-left';
+                        button.textContent = value || 'Открыть исследование';
+                        button.setAttribute('aria-label', `Открыть исследование ${value || ''}`);
+                        td.replaceChildren(button);
+                    }
                     if (index === 1) {
                         td.classList.add('path-cell', 'max-w-xs', 'truncate');
-                        td.addEventListener('click', () => showPathModal(value || ''));
                     }
                     tr.appendChild(td);
                 });

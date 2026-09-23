@@ -1,0 +1,151 @@
+<style>
+    #study-dialog { width: min(1120px, 96vw); max-height: 94vh; border: 0; border-radius: 16px; padding: 24px; }
+    #study-dialog::backdrop { background: #111827bb; }
+    .study-images { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 16px; }
+    .study-images figure { background: #111827; border-radius: 8px; padding: 12px; color: white; }
+    .study-images img { width: 100%; height: 48vh; object-fit: contain; }
+    #study-summary { white-space: pre-wrap; overflow-wrap: anywhere; margin: 16px 0; }
+    #study-warnings { color: #92400e; white-space: pre-wrap; }
+    #study-explanation, #study-measurements { margin-top: 12px; white-space: pre-wrap; }
+    #study-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+    #study-controls select { max-width: 100%; border: 1px solid #9ca3af; border-radius: 6px; padding: 8px; }
+    #study-download { color: #1d4ed8; text-decoration: underline; }
+    #study-legend { margin-top: 16px; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px; }
+    #study-gradient-bar { display: block; width: 100%; height: 16px; margin: 8px 0; border-radius: 4px; }
+    .study-legend-labels { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+    .study-line-key { display: inline-block; width: 32px; height: 4px; margin-right: 8px; vertical-align: middle; }
+    @media (max-width: 640px) { .study-images { grid-template-columns: 1fr; } }
+</style>
+<dialog id="study-dialog" aria-labelledby="study-title">
+    <div class="flex justify-between items-center gap-4">
+        <h2 id="study-title" class="text-xl font-bold">Исследование</h2>
+        <button id="study-close" type="button" class="px-4 py-2 rounded border" aria-label="Закрыть исследование">Закрыть</button>
+    </div>
+    <p id="study-summary"></p>
+    <p id="study-state" role="status" aria-live="polite"></p>
+    <p id="study-warnings"></p>
+    <div id="study-view" hidden>
+        <div id="study-controls">
+            <label for="study-layer">Нарушение:</label>
+            <select id="study-layer"></select>
+            <label><input id="study-overlay" type="checkbox" checked> Показать наложение</label>
+            <a id="study-download" hidden>Скачать дополнительную DICOM-серию (ZIP)</a>
+        </div>
+        <div class="study-images">
+            <figure><figcaption>Исходное изображение</figcaption><img id="study-original" alt="Исходный снимок DICOM"></figure>
+            <figure id="study-result-figure"><figcaption>Визуализация нарушения</figcaption><img id="study-result" alt="Визуализация обнаруженного нарушения"></figure>
+        </div>
+        <div id="study-legend" hidden aria-label="Легенда визуализации">
+            <div id="study-heatmap-legend" hidden>
+                <p>Относительная чувствительность модели</p>
+                <img id="study-gradient-bar" alt="Цветовая шкала от синего через голубой, зелёный и жёлтый к красному">
+                <div class="study-legend-labels"><span>0 · низкая</span><span>1 · высокая</span></div>
+                <p class="text-sm mt-2">Шкала нормирована для текущей карты и не обозначает вероятность нарушения. Слабые значения на снимке прозрачнее.</p>
+            </div>
+            <div id="study-axis-legend" hidden>
+                <p><span class="study-line-key" style="background: rgb(34, 211, 238)"></span>Вертикальный ориентир</p>
+                <p><span class="study-line-key" style="background: rgb(255, 153, 51)"></span>Ось позвоночника</p>
+            </div>
+        </div>
+        <p id="study-explanation"></p>
+        <p id="study-measurements"></p>
+    </div>
+</dialog>
+<script>
+(() => {
+    const el = id => document.getElementById(id);
+    const dialog = el('study-dialog');
+    let controller = null;
+    let data = null;
+    function draw() {
+        const item = data?.items[Number(el('study-layer').value)];
+        el('study-result').src = item && el('study-overlay').checked ? item.image : data.original;
+        el('study-explanation').textContent = item?.explanation || '';
+        const showLegend = Boolean(item && el('study-overlay').checked);
+        const heatLegend = showLegend && item.kind === 'heatmap' && Boolean(item.legend);
+        const axisLegend = showLegend && item.kind === 'spine_axis';
+        el('study-legend').hidden = !(heatLegend || axisLegend);
+        el('study-heatmap-legend').hidden = !heatLegend;
+        el('study-axis-legend').hidden = !axisLegend;
+        if (heatLegend) el('study-gradient-bar').src = item.legend;
+        else el('study-gradient-bar').removeAttribute('src');
+        const details = item?.details;
+        const lines = [];
+        if (details) {
+            const labels = {top: 'Верхний отступ', bottom: 'Нижний отступ', lateral: 'Боковой отступ'};
+            for (const [key, value] of Object.entries(details.margins_mm || {})) {
+                const range = details.margin_ranges_mm?.[key];
+                lines.push(`${labels[key] || key}: ${value} мм; требуется ≥ ${details.required_mm[key]} мм` +
+                    (range ? `; диапазон ${range.map(v => Number(v).toFixed(1)).join('–')} мм` : ''));
+            }
+            if (details.conclusion) lines.push(details.conclusion);
+            lines.push(...(details.warnings || []));
+        }
+        el('study-measurements').textContent = lines.join('\n');
+    }
+    el('study-close').onclick = () => dialog.close();
+    dialog.addEventListener('close', () => { controller?.abort(); });
+    dialog.addEventListener('click', event => { if (event.target === dialog) {
+        const rect = dialog.getBoundingClientRect();
+        if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) dialog.close();
+    }});
+    el('study-layer').onchange = draw;
+    el('study-overlay').onchange = draw;
+    window.showStudy = async (row, index, taskId) => {
+        controller?.abort();
+        const request = new AbortController();
+        controller = request;
+        data = null;
+        el('study-title').textContent = row.filename || 'Исследование';
+        const failed = row.processing_status !== 'Success';
+        const probability = row.quality_prob == null ? 'не определена' : `${(row.quality_prob * 100).toFixed(1)}%`;
+        el('study-summary').textContent = [
+            `Область: ${row.anatomical_region || 'не определена'}${row.hip_side ? (row.hip_side === 'right' ? ' (справа)' : ' (слева)') : ''}`,
+            `Результат: ${failed ? 'ошибка обработки' : row.quality_class === 1 ? 'обнаружены нарушения' : 'нарушения не обнаружены'}`,
+            `Вероятность класса: ${probability}`,
+            ...(row.violation_type || []),
+            ...(failed ? [row.error_message || 'Анализ не завершён'] : []),
+            `Study UID: ${row.study_uid || '—'}`,
+            `Image UID: ${row.image_uid || '—'}`,
+            `Время анализа: ${row.time_of_processing ?? '—'} с`,
+            `Путь: ${row.path_to_study || row.path || '—'}`
+        ].join('\n');
+        el('study-view').hidden = true;
+        el('study-download').hidden = true;
+        el('study-download').removeAttribute('href');
+        el('study-warnings').textContent = '';
+        el('study-state').textContent = 'Подготовка изображения и визуализаций…';
+        if (!dialog.open) dialog.showModal();
+        try {
+            const response = await fetch(`/api/visualization/${encodeURIComponent(taskId)}/${index}`, {signal: request.signal});
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.detail || 'Ошибка загрузки визуализации');
+            if (request.signal.aborted) return;
+            data = payload;
+            el('study-state').textContent = payload.items.length ? `Визуализаций: ${payload.items.length}` :
+                failed ? 'Анализ не завершён. Доступен только исходный снимок.' :
+                row.quality_class === 0 ? 'Нарушения не обнаружены. Дополнительная серия не требуется.' : 'Визуализация обнаруженных нарушений недоступна.';
+            el('study-warnings').textContent = payload.warnings.join('\n');
+            el('study-original').src = payload.original;
+            el('study-layer').replaceChildren(...payload.items.map((item, i) => {
+                const option = document.createElement('option');
+                option.value = i;
+                option.textContent = item.title;
+                return option;
+            }));
+            el('study-controls').hidden = !payload.items.length;
+            el('study-controls').style.display = payload.items.length ? 'flex' : 'none';
+            el('study-result-figure').hidden = !payload.items.length;
+            el('study-overlay').checked = true;
+            if (payload.series_uid) {
+                el('study-download').href = `/api/visualization/${encodeURIComponent(taskId)}/${index}/dicom`;
+                el('study-download').hidden = false;
+            }
+            draw();
+            el('study-view').hidden = false;
+        } catch (error) {
+            if (error.name !== 'AbortError') el('study-state').textContent = error.message;
+        }
+    };
+})();
+</script>

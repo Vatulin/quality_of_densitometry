@@ -13,11 +13,13 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 
 if __package__:
+    from .visualization.service import register_visualization
     from .inference_models import (
         BodyPartModel, SpineModel, HipQualityModel, ArtifactModel,
         SpinePositionModel, PositionModel,
     )
 else:
+    from visualization.service import register_visualization
     from inference_models import (
         BodyPartModel, SpineModel, HipQualityModel, ArtifactModel,
         SpinePositionModel, PositionModel,
@@ -214,13 +216,14 @@ def failed_result(dcm_path: str, error: Exception) -> Dict:
 # FASTAPI 
 
 app = FastAPI(title="DXA Multi-Model Analyzer")
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 analyzer: MultiModelAnalyzer | None = None
 tasks: Dict = {}
+register_visualization(app, tasks, lambda: analyzer)
 
 
 @app.on_event("startup")

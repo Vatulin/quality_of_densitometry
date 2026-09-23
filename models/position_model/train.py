@@ -11,8 +11,8 @@ bounding box всей кости: диафиз закономерно доход
 верхняя огибающая большого вертела и нижний отдельный медиальный
 контур седалищной кости. Согласованность трёх сегментаций проверяется в мм.
 Это эвристические анатомические ориентиры, не гарантированная сегментация.
-Неоднозначное заключение, неподдерживаемые изображения и пограничные измерения
-дают quality_class=None / Failure, а не ложное заключение об отсутствии дефекта.
+Пограничные измерения дают quality_class=1 / Success с указанием возможного
+дефекта и предупреждением. Ошибки чтения/выделения ориентиров дают Failure.
 Проверяется только поле обзора, не ротация и не вся категория position_defects.
 
 Для исходных экспортов GE в этом датасете hip_left соответствует правому
@@ -380,20 +380,24 @@ def analyze_image(gray, side="auto"):
             violations.append(key + "_margin_too_small")
         elif lo - error < minimum:
             uncertain.append(key)
-    status = "Failure" if uncertain and not violations else "Success"
-    return {"quality_class": 1 if violations else (None if uncertain else 0),
-            "processing_status": status, "violation_type": violations,
+    # Неопределённость измерения — результат проверки, а не сбой обработки.
+    # Сохраняем отличие возможного дефекта от подтверждённого нарушения.
+    suspected = [key + "_margin_borderline" for key in uncertain]
+    return {"quality_class": 1 if violations or uncertain else 0,
+            "processing_status": "Success", "violation_type": violations + suspected,
             "margins_mm": {k: round(float(np.median([m[0][k] for m in measurements])), 2) for k in REQUIRED_MM},
             "margin_ranges_mm": intervals, "required_mm": REQUIRED_MM.copy(),
             "landmarks_px": measurements[1][1], "lateral_image_edge": measurements[1][2],
             "uncertain_margins": uncertain,
-            "suspected_violation_type": [key + "_margin_borderline" for key in uncertain],
+            "suspected_violation_type": suspected,
             "unstable_landmarks": unstable,
             "warnings": (["Положение части ориентиров зависит от порога сегментации; "
                           "измерения приблизительные, решение учитывает весь диапазон отступов"]
-                         if unstable else []),
+                         if unstable else []) +
+                        (["Отступ около порога: результат отмечен как возможный дефект ROI"]
+                         if uncertain else []),
             "conclusion": ("Недостаточные отступы области интереса" if violations else
-                           "Возможен дефект области интереса: отступ около порога, требуется ручная проверка" if uncertain else
+                           "Возможен дефект области интереса: отступ около порога" if uncertain else
                            "Отступы области интереса соответствуют ТЗ")}
 
 

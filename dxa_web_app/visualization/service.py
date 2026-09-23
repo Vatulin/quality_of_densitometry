@@ -134,13 +134,26 @@ def roi_overlay(rgb, report):
         codes = report.get("violation_type", [])
         color = (255, 70, 70) if any(c.startswith(margin+"_margin") for c in codes) else (60, 220, 130)
         end = (x, 0) if margin == "top" else (x, h-1) if margin == "bottom" else (w-1 if report.get("lateral_image_edge") == "right" else 0, y)
-        cv2.line(image, (x, y), end, color, 2)
-        cv2.circle(image, (x, y), 5, color, -1)
+        distance = float(np.hypot(end[0]-x, end[1]-y))
+        if distance > 0:
+            tip = min(.4, 7.0/distance)
+            cv2.arrowedLine(image, (x, y), end, color, 2, cv2.LINE_AA, tipLength=tip)
+            cv2.arrowedLine(image, end, (x, y), color, 2, cv2.LINE_AA, tipLength=tip)
+        else:
+            # A landmark on the border has zero margin: point to the border
+            # from inside the frame rather than inventing a measurement span.
+            start = (x, min(h-1, 16)) if margin == "top" else (x, max(0, h-17)) if margin == "bottom" else (max(0, w-17) if end[0] == w-1 else min(w-1, 16), y)
+            cv2.arrowedLine(image, start, end, color, 2, cv2.LINE_AA, tipLength=.4)
         cv2.putText(image, label, (max(0, min(x+7, w-18)), max(18, y)), cv2.FONT_HERSHEY_SIMPLEX, .6, color, 2)
     box = report.get("clipped_fragment_bbox_px")
     if box:
         x, y, bw, bh = map(int, box)
         cv2.rectangle(image, (x, y), (x+bw-1, y+bh-1), (255, 70, 70), 2)
+        # The clipped-fragment fallback has no landmarks. Mark the actual
+        # bottom border instead of silently returning only a rectangle.
+        centre = max(0, min(w-1, x+bw//2))
+        cv2.arrowedLine(image, (centre, max(0, min(y, h-17))),
+                        (centre, h-1), (255, 70, 70), 2, cv2.LINE_AA, tipLength=.3)
     if not points and not box:
         raise ValueError("Координаты ориентиров отсутствуют")
     return image
@@ -197,9 +210,19 @@ def build(result, analyzer):
     rgb = np.repeat((display*255).astype(np.uint8)[..., None], 3, axis=2)
     payload = {"original": png(rgb), "items": [], "warnings": []}
     frames = []
+    predictions = result.get("model_predictions", {})
+    roi_prediction = predictions.get("position", {})
+    roi_report = roi_prediction.get("roi_details") or {}
+    roi_available = (roi_prediction.get("status") == "success"
+                     and roi_report.get("processing_status") == "Success")
+    roi_rendered = False
     titles = {"artifact": "Наличие артефактов", "spine": "Не выравнена ось позвоночника", "spine_position": "Некорректная укладка позвоночника", "position": "Отступы ROI"}
-    for name, pred in result.get("model_predictions", {}).items():
-        if name == "body_part" or pred.get("class_id") != 1:
+    for name, pred in sorted(predictions.items(), key=lambda pair: pair[0] == "position"):
+        # Measurements are useful even when the separate ROI classifier flags
+        # a defect but the margin algorithm finds all distances sufficient.
+        if name == "position" and roi_rendered:
+            continue
+        if name == "body_part" or (pred.get("class_id") != 1 and not (name == "position" and roi_available)):
             continue
         targets = [(0, titles.get(name, name))]
         if name == "hip_quality":
@@ -208,12 +231,23 @@ def build(result, analyzer):
         for target, title in targets:
             try:
                 details = pred.get("roi_details")
+                hip_roi = (name == "hip_quality" and model is not None
+                           and model.LABEL_COLS[target] == "roi_correctness")
                 kind = "heatmap"
                 legend = None
-                if name == "position":
+                if name == "position" or hip_roi:
+                    if hip_roi:
+                        if not roi_available:
+                            raise ValueError("Измерения отступов недоступны: стрелки без анатомических ориентиров не строятся")
+                        details = roi_report
                     kind = "roi"
                     overlay = roi_overlay(rgb, details or {})
-                    explanation = "1 — большой вертел; 2 — седалищная кость; 3 — наружный контур. Красным отмечены недостаточные или пограничные отступы, зелёным — достаточные."
+                    explanation = "1 — большой вертел; 2 — седалищная кость; 3 — наружный контур. Двусторонние стрелки показывают отступы до краёв снимка: красные — недостаточные или пограничные, зелёные — достаточные. При нулевом отступе одиночная стрелка указывает на край снимка."
+                    if hip_roi:
+                        explanation += " Классификатор ROI и проверка отступов оценивают разные признаки: зелёные стрелки не отменяют заключение классификатора."
+                    if (details or {}).get("clipped_fragment_bbox_px"):
+                        explanation += " Стрелка у нижнего края показывает обрезанный фрагмент; отступы без выделенных ориентиров не измерены."
+                    roi_rendered = True
                 elif name == "spine":
                     kind = "spine_axis"
                     overlay = spine_axis_overlay(rgb, display)

@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 
 if __package__:
+    from .reporting import csv_result_row
     from .visualization.service import register_visualization
     from .visualization.review import register_review
     from .inference_models import (
@@ -20,6 +21,7 @@ if __package__:
         SpinePositionModel, PositionModel,
     )
 else:
+    from reporting import csv_result_row
     from visualization.service import register_visualization
     from visualization.review import register_review
     from inference_models import (
@@ -331,26 +333,8 @@ async def download_result(task_id: str):
         return {"error": "Результат еще не готов"}
 
     columns = ["path_to_study", "study_uid", "image_uid", "anatomical_region",
-               "quality_class", "violation_type", "processing_status", "time_of_processing",
-               "error_message", "manually_reviewed", "model_quality_class",
-               "model_violation_type", "reviewed_at"]
-    rows = []
-    for result in task["results"]:
-        rows.append({
-            "path_to_study": result["path_to_study"],
-            "study_uid": result["study_uid"],
-            "image_uid": result["image_uid"],
-            "anatomical_region": result["anatomical_region"] or "",
-            "quality_class": result["quality_class"],
-            "violation_type": ";".join(result["violation_type"]) if result["violation_type"] else "",
-            "processing_status": result["processing_status"],
-            "time_of_processing": result["time_of_processing"],
-            "error_message": result["error_message"],
-            "manually_reviewed": result.get("manually_reviewed", False),
-            "model_quality_class": result.get("model_conclusion", result)["quality_class"],
-            "model_violation_type": ";".join(result.get("model_conclusion", result)["violation_type"]),
-            "reviewed_at": result.get("reviewed_at", ""),
-        })
+               "quality_class", "violation_type", "processing_status", "time_of_processing"]
+    rows = [csv_result_row(result) for result in task["results"]]
     df = pd.DataFrame(rows, columns=columns)
     df["quality_class"] = pd.array(df["quality_class"], dtype="Int64")
     csv_path = UPLOAD_DIR / f"{task_id}_result.csv"

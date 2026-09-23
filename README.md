@@ -20,7 +20,8 @@ API: `POST /api/analyze` принимает несколько multipart-пол�
 CSV в UTF-8 с BOM содержит колонки из п. 2.5 ТЗ в указанном порядке:
 `path_to_study`, `study_uid`, `image_uid`, `anatomical_region`, `quality_class`,
 `violation_type`, `processing_status`, `time_of_processing`.
-Дополнительная колонка `error_message` содержит причину технической ошибки.
+Дополнительные колонки не экспортируются. Причина технической ошибки доступна
+в поле `error_message` ответа API.
 Путь указывает на сохранённый файл на сервере, UID берутся из DICOM-тегов
 StudyInstanceUID и SOPInstanceUID (при отсутствии остаются пустыми).
 Время измеряется в секундах для каждого изображения, включая чтение его метаданных

@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 
 if __package__:
     from .reporting import csv_result_row
+    from .dicom_sr import register_dicom_sr
     from .visualization.service import register_visualization
     from .visualization.review import register_review
     from .inference_models import (
@@ -22,6 +23,7 @@ if __package__:
     )
 else:
     from reporting import csv_result_row
+    from dicom_sr import register_dicom_sr
     from visualization.service import register_visualization
     from visualization.review import register_review
     from inference_models import (
@@ -229,6 +231,7 @@ analyzer: MultiModelAnalyzer | None = None
 tasks: Dict = {}
 register_visualization(app, tasks, lambda: analyzer)
 register_review(app, tasks)
+register_dicom_sr(app, tasks)
 
 
 @app.on_event("startup")

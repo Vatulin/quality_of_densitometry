@@ -42,6 +42,9 @@
         <div id="results-section" class="hidden mt-8">
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-xl font-bold">Результаты анализа</h2>
+                <button id="download-sr-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg">
+                    Скачать DICOM SR (ZIP)
+                </button>
                 <button id="download-btn" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 transition">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
@@ -64,6 +67,7 @@
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Image UID</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Статус</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Время, с</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">DICOM SR</th>
                         </tr>
                     </thead>
                     <tbody id="results-table-body" class="bg-white divide-y divide-gray-200 text-sm"></tbody>
@@ -265,11 +269,45 @@
                     tr.appendChild(td);
                 });
                 tbody.appendChild(tr);
+                const srCell = document.createElement('td');
+                srCell.className = 'px-6 py-4';
+                if (!failed) {
+                    const srButton = document.createElement('button');
+                    srButton.textContent = 'Скачать SR';
+                    srButton.className = 'text-blue-700 underline';
+                    srButton.onclick = event => {
+                        event.stopPropagation();
+                        downloadSR(`/api/dicom-sr/${resultTaskId}/${rowIndex}`, `report_${rowIndex + 1}.dcm`);
+                    };
+                    srCell.appendChild(srButton);
+                } else {
+                    srCell.textContent = 'Недоступен';
+                }
+                tr.appendChild(srCell);
             });
 
             document.getElementById('download-btn').onclick = () => {
                 window.location.href = `/api/download/${currentTaskId}`;
             };
+            document.getElementById('download-sr-btn').onclick = () =>
+                downloadSR(`/api/dicom-sr/${resultTaskId}`, 'dicom_sr_reports.zip');
+        }
+        async function downloadSR(url, filename) {
+            try {
+                const response = await fetch(url);
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Не удалось сформировать DICOM SR');
+                }
+                const objectUrl = URL.createObjectURL(await response.blob());
+                const link = document.createElement('a');
+                link.href = objectUrl;
+                link.download = filename;
+                link.click();
+                setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+            } catch (error) {
+                alert(error.message);
+            }
         }
     </script>
 </body>

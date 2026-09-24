@@ -12,7 +12,7 @@ VOLUME=${VOLUME:-dxa-uploads}
 
 docker build --tag "$IMAGE" "$PROJECT_DIR"
 
-set -- docker run --rm --init \
+set -- docker run --detach --rm --init \
     --publish "$PORT:8000" \
     --mount "type=volume,src=$VOLUME,dst=/app/uploads"
 

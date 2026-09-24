@@ -51,7 +51,12 @@ import numpy as np
 import pydicom
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_ROOT = HERE.parents[3] / "Data"
+# Find local datasets without assuming the checkout's directory depth.
+# Container inference does not need Data; --data-root can override this fallback.
+DEFAULT_ROOT = next(
+    (parent / "Data" for parent in HERE.parents if (parent / "Data").is_dir()),
+    HERE.parent.parent / "Data",
+)
 SPACING_X = 0.6
 SPACING_Y = 1.05
 REQUIRED_MM = {"top": 30.0, "bottom": 30.0, "lateral": 20.0}

@@ -1,0 +1,26 @@
+# Only runtime code, pinned dependencies and model weights enter the build context.
+**
+!requirements.txt
+!dxa_web_app/
+!dxa_web_app/**
+!models/
+!models/**
+
+**/__pycache__/
+**/*.py[cod]
+**/.env
+**/.env.*
+**/.venv/
+**/venv/
+**/.git/
+**/.pytest_cache/
+**/.mypy_cache/
+**/uploads/
+**/datasets/
+**/*.dcm
+**/*.dicom
+**/*.zip
+**/*.csv
+**/*.xlsx
+**/*.log
+**/*.ipynb

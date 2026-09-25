@@ -11,6 +11,7 @@ import pydicom
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 
 if __package__:
     from .reporting import csv_result_row
@@ -222,6 +223,7 @@ def failed_result(dcm_path: str, error: Exception) -> Dict:
 # FASTAPI 
 
 app = FastAPI(title="DXA Multi-Model Analyzer")
+app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 UPLOAD_DIR = Path("uploads")

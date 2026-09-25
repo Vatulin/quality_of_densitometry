@@ -1,4 +1,4 @@
-"""CSV contract from the organizer's clarification, question 6."""
+"""Shared conclusion taxonomy and CSV contract (organizer's question 6)."""
 
 SPINE = "Поясничный отдел позвоночника"
 HIP = "Проксимальный отдел бедра"
@@ -34,27 +34,28 @@ VIOLATION_MAPPING = {
 }
 
 
-def csv_result_row(result: dict) -> dict:
-    """Export the current conclusion without modifying the detailed API result."""
+def canonical_violations(region: str, violations: list[str]) -> list[str]:
+    """Normalize model labels before publishing a conclusion in any format."""
     labels = set()
-    region = result["anatomical_region"]
-    success = result["processing_status"] == "Success"
-    if success:
-        mapping = VIOLATION_MAPPING[region]
-        for label in result["violation_type"]:
-            # The organizer defines no artifact category for hip studies.
-            if region == HIP and label in {"Наличие артефактов", FOREIGN_OBJECTS}:
-                continue
-            # Unknown labels must not be silently exported as a normal image.
-            labels.add(mapping[label])
-    violations = [label for label in VIOLATION_ORDER.get(region, ()) if label in labels]
+    mapping = VIOLATION_MAPPING[region]
+    for label in violations:
+        # Hip artifacts remain in model_predictions, outside the conclusion.
+        if region == HIP and label in {"Наличие артефактов", FOREIGN_OBJECTS}:
+            continue
+        # Unknown labels must fail analysis rather than produce a normal result.
+        labels.add(mapping[label])
+    return [label for label in VIOLATION_ORDER[region] if label in labels]
+
+
+def csv_result_row(result: dict) -> dict:
+    """Serialize the same conclusion exposed by the API, including manual review."""
     return {
         "path_to_study": result["path_to_study"],
         "study_uid": result["study_uid"],
         "image_uid": result["image_uid"],
-        "anatomical_region": region or "",
-        "quality_class": int(bool(violations)) if success else None,
-        "violation_type": ";".join(violations),
+        "anatomical_region": result["anatomical_region"] or "",
+        "quality_class": result["quality_class"],
+        "violation_type": ";".join(result["violation_type"]),
         "processing_status": result["processing_status"],
         "time_of_processing": result["time_of_processing"],
     }

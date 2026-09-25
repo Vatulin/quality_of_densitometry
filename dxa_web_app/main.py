@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 if __package__:
-    from .reporting import csv_result_row
+    from .reporting import csv_result_row, canonical_violations
     from .dicom_sr import register_dicom_sr
     from .visualization.service import register_visualization
     from .visualization.review import register_review
@@ -23,7 +23,7 @@ if __package__:
         SpinePositionModel, PositionModel,
     )
 else:
-    from reporting import csv_result_row
+    from reporting import csv_result_row, canonical_violations
     from dicom_sr import register_dicom_sr
     from visualization.service import register_visualization
     from visualization.review import register_review
@@ -173,6 +173,10 @@ class MultiModelAnalyzer:
         for model_name, kwargs, violation_label in checks:
             pred = self._predict(model_name, dcm_path, **kwargs)
             results["model_predictions"][model_name] = pred
+            # This observation is not an organizer-defined hip violation.
+            # Keep it for inspection, but exclude it from class and confidence.
+            if hip_side is not None and model_name == "artifact":
+                continue
             if "probability" in pred:
                 violation_probs.append(float(pred["probability"]))
             violation_probs.extend(float(p) for p in pred.get("probabilities", []))
@@ -183,6 +187,7 @@ class MultiModelAnalyzer:
                         violations.append(label)
                 roi_violation |= model_name == "position"
 
+        violations = canonical_violations(region, violations)
         max_violation_prob = max(violation_probs) if violation_probs else 0.0
 
         results["violation_type"] = violations

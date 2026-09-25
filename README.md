@@ -109,15 +109,105 @@ path_to_study,study_uid,image_uid,anatomical_region,quality_class,violation_type
 | `GET /api/dicom-sr/{task_id}` | ZIP отчётов DICOM SR пакета с `manifest.json` |
 | `PUT /api/conclusion/{task_id}/{index}` | JSON `{"violations": [], "revision": 0}`; отмена/восстановление найденных нарушений |
 
-Пример пакетной обработки (Linux — `curl`, Windows PowerShell — `curl.exe`):
+### Примеры запросов
+
+Сервис должен быть запущен. В примерах используется `http://localhost:8000`;
+при другом адресе или порте замените его во всех командах. В Linux/macOS используйте
+`curl`, в Windows PowerShell — `curl.exe` (чтобы не вызвать одноимённый псевдоним).
+Пути после `@` указывают на локальные файлы клиента.
+
+**Загрузка одного DICOM:**
 
 ```sh
-curl -F "files=@study.dcm" -F "files=@batch.zip" http://localhost:8000/api/analyze
-curl http://localhost:8000/api/status/TASK_ID
-curl -o results.csv http://localhost:8000/api/download/TASK_ID
+curl -sS -F "files=@study.dcm" http://localhost:8000/api/analyze
 ```
 
-Замените `TASK_ID` значением из первого ответа; CSV скачивайте после `COMPLETED`. Этот статус означает завершение пакета, а не успех каждой строки.
+**Пакет из нескольких файлов и архива:** повторяйте поле `files`.
+
+```sh
+curl -sS -F "files=@spine.dcm" -F "files=@hip.dicom" -F "files=@batch.zip" http://localhost:8000/api/analyze
+```
+
+Пример ответа (ID будет другим):
+
+```json
+{"task_id":"8b7f620e-701c-45f9-8c77-e31435876139"}
+```
+
+**Статус и результаты:** замените `TASK_ID` полученным ID.
+
+```sh
+curl -sS http://localhost:8000/api/status/TASK_ID
+```
+
+Повторяйте запрос до `status: "COMPLETED"`. Поля `progress` и `total` показывают
+число обработанных и найденных файлов; `results` содержит результаты изображений.
+`COMPLETED` означает завершение пакета, а не успех каждой строки: проверьте
+`processing_status` и `error_message` у каждого результата.
+
+**Общий CSV после завершения:**
+
+```sh
+curl -sS -o results.csv http://localhost:8000/api/download/TASK_ID
+```
+
+**Визуализация первого изображения:** `0` — индекс в массиве `results`.
+
+```sh
+curl -sS -f -o visualization_0.json http://localhost:8000/api/visualization/TASK_ID/0
+curl -sS -f -o visualization_0.zip http://localhost:8000/api/visualization/TASK_ID/0/dicom
+```
+
+JSON содержит `original` (PNG в data URL), `items` с изображениями и пояснениями,
+а также `warnings`. ZIP содержит дополнительную DICOM-серию. Если серии нет,
+запрос ZIP вернёт HTTP 409; это возможно и для успешно обработанного снимка.
+
+**Все дополнительные визуальные серии пакета:**
+
+```sh
+curl -sS -f -o visualization_series.zip http://localhost:8000/api/series/TASK_ID
+```
+
+Архив содержит отдельные каталоги изображений и `manifest.json` со статусом
+экспорта каждой строки (`Success`, `Partial`, `Skipped`, `Failure`), списком файлов,
+предупреждениями и причинами ошибок. Ошибка одного снимка не отменяет остальные.
+Если серий нет, архив содержит только манифест.
+
+**Текстовый DICOM SR одного изображения и всех изображений пакета:**
+
+```sh
+curl -sS -f -o report_0.dcm http://localhost:8000/api/dicom-sr/TASK_ID/0
+curl -sS -f -o dicom_sr_reports.zip http://localhost:8000/api/dicom-sr/TASK_ID
+```
+
+Скачивайте после `COMPLETED`. Общий ZIP включает `manifest.json`: проверьте его,
+чтобы узнать, для каких изображений отчёт не сформирован.
+
+**Ручная отмена нарушений первого изображения:** создайте файл `conclusion.json`
+в UTF-8 со следующим содержимым:
+
+```json
+{"violations": [], "revision": 0}
+```
+
+Перед отправкой получите актуальный статус задачи. В `revision` укажите
+`results[0].review_revision`; если поле отсутствует, используйте `0`.
+Пустой `violations` отменяет все нарушения этого изображения:
+
+```sh
+curl -sS -f -X PUT -H "Content-Type: application/json" --data-binary "@conclusion.json" http://localhost:8000/api/conclusion/TASK_ID/0
+```
+
+Ответ содержит обновлённый результат и увеличенный `review_revision`.
+Для частичной отмены оставьте в `violations` нужные строки из исходного заключения.
+Для восстановления возьмите список `model_conclusion.violation_type` из актуального
+результата и отправьте его с текущей ревизией. Новые нарушения, которых модель
+не находила, добавлять нельзя. При HTTP 409 заново получите статус и проверьте
+ревизию, завершение пакета и успешность анализа изображения. После изменения
+заключения повторно скачайте CSV или SR, чтобы получить актуальный отчёт.
+
+
+
 
 ## Модели и обработка
 

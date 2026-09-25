@@ -1,9 +1,11 @@
 """On-demand explanations and an in-memory DICOM Secondary Capture series."""
 import base64
+import json
 from collections import OrderedDict
 from datetime import datetime
 from io import BytesIO
 from threading import Lock
+from tempfile import SpooledTemporaryFile
 import zipfile
 
 import cv2
@@ -12,7 +14,8 @@ import pydicom
 import torch
 from PIL import Image
 from fastapi import HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
+from starlette.background import BackgroundTask
 from pydicom.dataset import FileDataset, FileMetaDataset, Dataset
 from pydicom.uid import ExplicitVRLittleEndian, SecondaryCaptureImageStorage, generate_uid
 from scipy.ndimage import gaussian_filter, gaussian_filter1d, median_filter
@@ -307,3 +310,69 @@ def register_visualization(app, tasks, get_analyzer):
         if not archive:
             raise HTTPException(409, "Дополнительная серия отсутствует")
         return Response(archive, media_type="application/zip", headers={"Content-Disposition": 'attachment; filename="visualization_series.zip"'})
+
+    @app.get("/api/series/{task_id}")
+    def download_batch_series(task_id: str):
+        task = tasks.get(task_id)
+        if task is None:
+            raise HTTPException(404, "Задача не найдена")
+        if task.get("status") != "COMPLETED":
+            raise HTTPException(409, "Дождитесь завершения анализа")
+
+        # Large batches spill to disk instead of retaining the entire ZIP in RAM.
+        stream = SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b")
+        manifest = []
+        try:
+            with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as output:
+                for index, result in enumerate(list(task["results"])):
+                    entry = {
+                        "index": index, "filename": result.get("filename", ""),
+                        "path_to_study": result.get("path_to_study", ""),
+                        "study_uid": result.get("study_uid", ""),
+                        "image_uid": result.get("image_uid", ""),
+                        "processing_status": result.get("processing_status"),
+                        "files": [], "warnings": [],
+                    }
+                    try:
+                        if result.get("processing_status") != "Success":
+                            raise ValueError(result.get("error_message") or "Ошибка анализа изображения")
+                        payload, archive = retrieve(task_id, index)
+                        entry["warnings"] = payload.get("warnings", [])
+                        if not archive:
+                            entry.update(
+                                status="Failure" if entry["warnings"] else "Skipped",
+                                reason="; ".join(entry["warnings"]) or "Дополнительная визуальная серия отсутствует",
+                            )
+                        else:
+                            # Read the whole individual series before adding it, so a
+                            # corrupt member cannot leave a half-exported series.
+                            with zipfile.ZipFile(BytesIO(archive)) as source:
+                                members = [(item.filename, source.read(item))
+                                           for item in source.infolist() if not item.is_dir()]
+                            if not members:
+                                raise ValueError("Дополнительная серия пуста")
+                            for number, (_, data) in enumerate(members, 1):
+                                name = f"image_{index + 1:04d}/visualization_{number}.dcm"
+                                output.writestr(name, data)
+                                entry["files"].append(name)
+                            entry.update(status="Partial" if entry["warnings"] else "Success",
+                                         series_uid=payload.get("series_uid", ""))
+                    except Exception as exc:
+                        entry.update(status="Failure", reason=str(exc.detail if isinstance(exc, HTTPException) else exc))
+                    manifest.append(entry)
+                output.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+            stream.seek(0)
+        except Exception:
+            stream.close()
+            raise
+
+        def chunks():
+            try:
+                while chunk := stream.read(1024 * 1024):
+                    yield chunk
+            finally:
+                stream.close()
+
+        return StreamingResponse(chunks(), media_type="application/zip",
+                                 headers={"Content-Disposition": 'attachment; filename="visualization_series.zip"'},
+                                 background=BackgroundTask(stream.close))

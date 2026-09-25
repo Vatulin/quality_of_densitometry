@@ -40,8 +40,11 @@
 
         <!-- Результаты -->
         <div id="results-section" class="hidden mt-8">
-            <div class="flex justify-between items-center mb-4">
+            <div class="flex flex-wrap gap-3 justify-between items-center mb-4">
                 <h2 class="text-xl font-bold">Результаты анализа</h2>
+                <button id="download-series-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg disabled:opacity-50" type="button">
+                    Скачать визуальные серии (ZIP)
+                </button>
                 <button id="download-sr-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg">
                     Скачать DICOM SR (ZIP)
                 </button>
@@ -291,13 +294,25 @@
             };
             document.getElementById('download-sr-btn').onclick = () =>
                 downloadSR(`/api/dicom-sr/${resultTaskId}`, 'dicom_sr_reports.zip');
+            document.getElementById('download-series-btn').onclick = async () => {
+                const button = document.getElementById('download-series-btn');
+                const label = button.textContent;
+                button.disabled = true;
+                button.textContent = 'Формирование архива…';
+                try {
+                    await downloadSR(`/api/series/${resultTaskId}`, 'visualization_series.zip');
+                } finally {
+                    button.disabled = false;
+                    button.textContent = label;
+                }
+            };
         }
         async function downloadSR(url, filename) {
             try {
                 const response = await fetch(url);
                 if (!response.ok) {
                     const error = await response.json();
-                    throw new Error(error.detail || 'Не удалось сформировать DICOM SR');
+                    throw new Error(error.detail || 'Не удалось скачать файл');
                 }
                 const objectUrl = URL.createObjectURL(await response.blob());
                 const link = document.createElement('a');

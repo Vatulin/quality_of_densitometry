@@ -62,9 +62,9 @@ docker run -d --rm --init --name dxa-quality -p 8000:8000 --mount type=volume,sr
 **Windows (PowerShell):**
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m uvicorn dxa_web_app.main:app --host 127.0.0.1 --port 8000 --workers 1
+py -3.12 -m venv venv
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe -m uvicorn dxa_web_app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 **Linux:**

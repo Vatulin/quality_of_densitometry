@@ -96,8 +96,8 @@ def build_sr(source, result):
     ds.Modality = "SR"
     ds.SeriesNumber = 900
     ds.InstanceNumber = 1
-    ds.SeriesDescription = "DXA quality report"
-    ds.Manufacturer = "DXA Multi-Model Analyzer"
+    ds.SeriesDescription = "Отчёт о качестве денситометрии"
+    ds.Manufacturer = "Многомодельный анализатор денситометрии"
     ds.ReferencedPerformedProcedureStepSequence = []
     ds.PerformedProcedureCodeSequence = []
     now = datetime.now(timezone.utc)
@@ -109,7 +109,7 @@ def build_sr(source, result):
     ds.PreliminaryFlag = "PRELIMINARY"
     ds.ValueType = "CONTAINER"
     ds.ContinuityOfContent = "SEPARATE"
-    ds.ConceptNameCodeSequence = concept("QUALITY_REPORT", "DXA quality report")
+    ds.ConceptNameCodeSequence = concept("QUALITY_REPORT", "Отчёт о качестве денситометрии")
 
     items = []
     if not invalid:
@@ -126,39 +126,39 @@ def build_sr(source, result):
         image = Dataset()
         image.RelationshipType = "CONTAINS"
         image.ValueType = "IMAGE"
-        image.ConceptNameCodeSequence = concept("SOURCE", "Source image")
+        image.ConceptNameCodeSequence = concept("SOURCE", "Исходное изображение")
         image.ReferencedSOPSequence = [deepcopy(reference)]
         items.append(image)
     else:
-        items.append(text_item("SOURCE_FILE", "Source file",
+        items.append(text_item("SOURCE_FILE", "Исходный файл",
                                str(result.get("filename") or "Имя файла не указано")))
-        items.append(text_item("SOURCE_UIDS", "Original source identifiers",
+        items.append(text_item("SOURCE_UIDS", "Идентификаторы исходного изображения",
                                "\n".join(f"{name}: {value or 'отсутствует'}"
                                          for name, value in identifiers.items())))
         note = ("Автоматическая привязка к исходному изображению недоступна: "
                 "отсутствуют или некорректны идентификаторы " + ", ".join(invalid) + ".")
         if "StudyInstanceUID" in invalid:
-            note += " Для SR сформирован новый идентификатор исследования."
-        items.append(text_item("SOURCE_WARNING", "Source metadata warning", note))
+            note += " Для отчёта сформирован новый идентификатор исследования."
+        items.append(text_item("SOURCE_WARNING", "Предупреждение о метаданных исходного изображения", note))
     region = result.get("anatomical_region") or "Не определена"
     side = {"right": "Правая", "left": "Левая"}.get(result.get("hip_side"))
-    items.append(text_item("REGION", "Anatomical region", region))
+    items.append(text_item("REGION", "Анатомическая область", region))
     if invalid_metadata:
-        items.append(text_item("METADATA_WARNING", "Invalid source metadata",
-                               "Некорректные значения исходных метаданных не перенесены в SR: "
+        items.append(text_item("METADATA_WARNING", "Некорректные исходные метаданные",
+                               "Некорректные значения исходных метаданных не перенесены в отчёт: "
                                + ", ".join(invalid_metadata) + "."))
     if side:
-        items.append(text_item("SIDE", "Side", side))
-    items.append(text_item("CONCLUSION", "Quality conclusion",
+        items.append(text_item("SIDE", "Сторона", side))
+    items.append(text_item("CONCLUSION", "Заключение о качестве",
                            "Выявлены нарушения качества исследования." if labels else
                            "По результатам анализа нарушения качества не выявлены."))
-    items.extend(text_item("VIOLATION", "Quality violation", label) for label in labels)
-    items.append(text_item("METHOD", "Conclusion source", "Автоматический анализ качества DXA."))
+    items.extend(text_item("VIOLATION", "Нарушение качества", label) for label in labels)
+    items.append(text_item("METHOD", "Источник заключения", "Автоматический анализ качества денситометрии."))
     if result.get("model_conclusion"):
         original = result["model_conclusion"]["violation_type"]
-        items.append(text_item("MODEL_RESULT", "Original model conclusion",
+        items.append(text_item("MODEL_RESULT", "Исходное заключение модели",
                                "; ".join(original) or "Нарушения не выявлены."))
-        items.append(text_item("REVIEW", "Manual review",
+        items.append(text_item("REVIEW", "Ручная проверка",
                                "Заключение просмотрено вручную. Дата: " + result.get("reviewed_at", "не указана")))
     ds.ContentSequence = items
     return ds

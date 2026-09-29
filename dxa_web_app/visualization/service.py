@@ -203,7 +203,7 @@ def secondary_capture(source, rgb, series_uid, number, title):
 
 
 def build(result, analyzer):
-    path = result["path_to_study"]
+    path = result["path"]
     ds = pydicom.dcmread(path)
     raw = ds.pixel_array.astype(np.float32)
     if raw.ndim != 2 or int(ds.get("SamplesPerPixel", 1)) != 1 or not np.isfinite(raw).all():

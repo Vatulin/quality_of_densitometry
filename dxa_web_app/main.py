@@ -313,18 +313,19 @@ def process_files(task_id: str, file_paths: List[Path]):
                                 if p.is_file() and p.suffix.lower() in {".dcm", ".dicom"})
                 if not images:
                     raise ValueError("В архиве нет DICOM-файлов (.dcm, .dicom)")
-                pending.extend((p, None) for p in images)
+                pending.extend((p, p.relative_to(extract_dir).as_posix()
+                                if p.parent != extract_dir else "/", None) for p in images)
             else:
-                pending.append((file_path, None))
+                pending.append((file_path, "/", None))
         except Exception as e:
             result = failed_result(str(file_path), e)
             result["time_of_processing"] = round(perf_counter() - started, 6)
-            pending.append((file_path, result))
+            pending.append((file_path, "/", result))
     task["total"] = len(pending)
     task["results"] = []
-    for file_path, failure in pending:
+    for file_path, relative_path, failure in pending:
         result = failure if failure is not None else analyze_safely(file_path)
-        result["path_to_study"] = str(file_path)
+        result["path_to_study"] = relative_path
         result["path"] = str(file_path)
         task["results"].append(result)
         task["progress"] += 1
